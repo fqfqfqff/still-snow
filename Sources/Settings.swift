@@ -92,6 +92,19 @@ enum SnowLanguage: String, CaseIterable, Identifiable {
 final class SnowPreferences: ObservableObject {
     private let defaults: UserDefaults
     var changed: (() -> Void)?
+    @Published var paused = false
+    @Published var garlands: Bool {
+        didSet { defaults.set(garlands, forKey: "garlands"); changed?() }
+    }
+    @Published var weather: Int {
+        didSet { defaults.set(weather, forKey: "weather") }
+    }
+    @Published var wind: Int {
+        didSet {
+            defaults.set(wind % 3 - 1, forKey: "windX")
+            defaults.set(wind / 3 - 1, forKey: "windY")
+        }
+    }
     @Published var language: SnowLanguage {
         didSet { defaults.set(language.rawValue, forKey: "language"); changed?() }
     }
@@ -122,6 +135,11 @@ final class SnowPreferences: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        garlands = defaults.bool(forKey: "garlands")
+        weather = min(2, max(0, defaults.object(forKey: "weather") as? Int ?? 1))
+        let x = min(1, max(-1, defaults.integer(forKey: "windX")))
+        let y = min(1, max(-1, defaults.integer(forKey: "windY")))
+        wind = (y + 1) * 3 + x + 1
         language = SnowLanguage(rawValue: defaults.string(forKey: "language") ?? "") ?? .system
         appearance = SnowAppearance(rawValue: defaults.string(forKey: "appearance") ?? "") ?? .system
         theme = SnowStyle(rawValue: defaults.string(forKey: "theme") ?? "") ?? .frost
@@ -207,9 +225,9 @@ struct SnowSettingsView: View {
                 Button(tr("Reset appearance", "Сбросить оформление")) { preferences.reset() }
                     .buttonStyle(.link)
             }
-            .padding(24)
+            .padding(16)
         }
-        .frame(minWidth: 540, idealWidth: 600, minHeight: 460, idealHeight: 720)
+
         .tint(preferences.theme == .retro ? .purple : preferences.theme == .minimal ? .teal : .blue)
         .background {
             if preferences.theme != .minimal {
@@ -231,9 +249,10 @@ struct SnowSettingsView: View {
             Canvas { context, geometry in
                 let color = Color(nsColor: preferences.color).opacity(preferences.opacity)
                 let width = Int(max(1, geometry.width))
+                let height = Int(max(1, geometry.height))
                 for index in 0..<62 {
                     let x = CGFloat((index * 71 + 43) % width)
-                    let y = CGFloat((index * 29 + 37) % 175)
+                    let y = CGFloat((index * 29 + 37) % height)
                     let size = CGFloat(1 + index % 4) * preferences.size
                     let rect = CGRect(x: x, y: y, width: size, height: size)
                     let path = preferences.theme == .retro ? Path(rect) : Path(ellipseIn: rect)
@@ -254,7 +273,7 @@ struct SnowSettingsView: View {
             .modifier(PreviewGlass(enabled: preferences.glass && !reduceTransparency, light: frostedLight))
             .padding(14)
         }
-        .frame(height: 168)
+        .frame(height: 118)
         .clipShape(RoundedRectangle(cornerRadius: preferences.theme == .retro ? 8 : 22))
         .accessibilityHidden(true)
     }
@@ -322,6 +341,108 @@ private struct PreviewGlass: ViewModifier {
             }
         } else {
             content.background(tint.opacity(0.75), in: Capsule())
+        }
+    }
+}
+
+struct SnowControlPanel: View {
+    @ObservedObject var preferences: SnowPreferences
+    @ObservedObject var updates: AppUpdates
+    let togglePause: () -> Void
+    let clearSnow: () -> Void
+    let checkUpdates: () -> Void
+    let quit: () -> Void
+    @State private var page = 0
+
+    private func tr(_ en: String, _ ru: String) -> String { preferences.language.usesRussian ? ru : en }
+
+    var body: some View {
+        VStack(spacing: 0) {
+            HStack {
+                Label("Still Snow", systemImage: "snowflake")
+                    .font(.headline)
+                Spacer()
+                Button(action: togglePause) {
+                    Image(systemName: preferences.paused ? "play.fill" : "pause.fill")
+                }
+                .help(preferences.paused ? tr("Resume snowfall", "Продолжить снег") : tr("Pause snowfall", "Пауза"))
+                .accessibilityLabel(preferences.paused ? tr("Resume snowfall", "Продолжить снег") : tr("Pause snowfall", "Пауза"))
+            }
+            .padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
+
+            Picker(tr("Section", "Раздел"), selection: $page) {
+                Text(tr("Snow", "Снег")).tag(0)
+                Text(tr("Settings", "Настройки")).tag(1)
+            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .padding(.horizontal, 16).padding(.bottom, 12)
+
+            Divider()
+            if page == 0 {
+                controls
+            } else {
+                SnowSettingsView(preferences: preferences)
+            }
+        }
+        .frame(width: 395, height: 495)
+        .preferredColorScheme(preferences.appearance == .system ? nil : preferences.appearance == .dark ? .dark : .light)
+    }
+
+    private var controls: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                VStack(alignment: .leading, spacing: 7) {
+                    Text(tr("Snowfall", "Снегопад")).font(.headline)
+                    Picker(tr("Snowfall", "Снегопад"), selection: $preferences.weather) {
+                        Text(tr("Light", "Лёгкий")).tag(0)
+                        Text(tr("Steady", "Ровный")).tag(1)
+                        Text(tr("Flurry", "Метель")).tag(2)
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                    Picker(tr("Wind", "Ветер"), selection: $preferences.wind) {
+                        ForEach(Array(zip(0...8, ["↙", "↓", "↘", "←", tr("Calm", "Штиль"), "→", "↖", "↑", "↗"])), id: \.0) { tag, label in
+                            Text(label).tag(tag)
+                        }
+                    }
+                }
+                Text(tr("Move the pointer through snow to sweep it. Click to scatter it, or drag from a drift to roll a ball.",
+                        "Проведи курсором, чтобы сдвинуть снег. Клик разбросает его, а зажатие и перетаскивание слепит шар."))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                Toggle(tr("Garlands on windows", "Гирлянды на окнах"), isOn: $preferences.garlands)
+                Button(tr("Clear snow", "Очистить снег"), action: clearSnow)
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(tr("Updates", "Обновления")).font(.headline)
+                    if updates.requiresInstallation {
+                        Text(tr("This copy is read-only. Quit it and open Still Snow from Applications in Finder.",
+                                "Эта копия только для чтения. Выйди из неё и открой Still Snow из «Программ» в Finder."))
+                            .font(.caption).foregroundStyle(.secondary)
+                        Button(tr("Open Applications", "Открыть «Программы»")) {
+                            NSWorkspace.shared.open(URL(fileURLWithPath: "/Applications"))
+                        }
+                    } else if updates.available {
+                        Button(tr("Check for updates…", "Проверить обновления…"), action: checkUpdates)
+                            .disabled(!updates.canCheck)
+                        Toggle(tr("Check automatically", "Проверять автоматически"), isOn: Binding(
+                            get: { updates.automaticChecks }, set: { updates.automaticChecks = $0 }
+                        ))
+                        Toggle(tr("Install automatically", "Устанавливать автоматически"), isOn: Binding(
+                            get: { updates.automaticInstallation }, set: { updates.automaticInstallation = $0 }
+                        )).disabled(!updates.automaticChecks)
+                    } else {
+                        Link(tr("Download a release build", "Скачать сборку с GitHub"),
+                             destination: URL(string: "https://github.com/fqfqfqff/still-snow/releases/latest")!)
+                    }
+                }
+                Divider()
+                Button(tr("Quit Still Snow", "Выйти из Still Snow"), action: quit)
+                    .buttonStyle(.link)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(16)
         }
     }
 }

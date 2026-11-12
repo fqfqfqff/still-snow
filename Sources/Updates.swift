@@ -1,25 +1,35 @@
 import AppKit
+import Combine
 import Sparkle
 
-final class AppUpdates: NSObject, SPUUpdaterDelegate {
+final class AppUpdates: NSObject, ObservableObject, SPUUpdaterDelegate, SPUStandardUserDriverDelegate {
     private var controller: SPUStandardUpdaterController?
+    private var checkingObservation: NSKeyValueObservation?
+    @Published private(set) var canCheck = false
+
+    var requiresInstallation: Bool {
+        let bundle = Bundle.main.bundleURL
+        if bundle.pathComponents.contains("AppTranslocation") { return true }
+        return (try? bundle.resourceValues(forKeys: [.volumeIsReadOnlyKey]).volumeIsReadOnly) == true
+    }
+
+    var supportsGentleScheduledUpdateReminders: Bool { true }
 #if UPDATE_TEST
     private var installImmediately = false
 #endif
 
     var available: Bool { controller != nil }
-    var canCheck: Bool { controller?.updater.canCheckForUpdates ?? false }
     var automaticChecks: Bool {
         get { controller?.updater.automaticallyChecksForUpdates ?? false }
-        set { controller?.updater.automaticallyChecksForUpdates = newValue }
+        set { objectWillChange.send(); controller?.updater.automaticallyChecksForUpdates = newValue }
     }
     var automaticInstallation: Bool {
         get { controller?.updater.automaticallyDownloadsUpdates ?? false }
-        set { controller?.updater.automaticallyDownloadsUpdates = newValue }
+        set { objectWillChange.send(); controller?.updater.automaticallyDownloadsUpdates = newValue }
     }
 
     func start() {
-        guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
+        guard !requiresInstallation, let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String,
               let url = URLComponents(string: feed),
               url.host?.isEmpty == false, url.user == nil, url.password == nil,
               let key = Bundle.main.object(forInfoDictionaryKey: "SUPublicEDKey") as? String,
@@ -31,7 +41,11 @@ final class AppUpdates: NSObject, SPUUpdaterDelegate {
 #endif
         guard url.scheme == "https" || localTestFeed else { return }
         controller = SPUStandardUpdaterController(startingUpdater: true,
-                                                   updaterDelegate: self, userDriverDelegate: nil)
+                                                   updaterDelegate: self, userDriverDelegate: self)
+        checkingObservation = controller?.updater.observe(\.canCheckForUpdates, options: [.initial, .new]) {
+            [weak self] updater, _ in
+            self?.canCheck = updater.canCheckForUpdates
+        }
 #if UPDATE_TEST
         if localTestFeed && CommandLine.arguments.contains("--verify-update") {
             installImmediately = true

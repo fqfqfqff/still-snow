@@ -6,17 +6,23 @@ struct DesktopWindow {
     let frame: CGRect
     let layer: Int
     let dock: Bool
+    var supportsSnow = true
 }
 
 struct DesktopScene {
     var windows: [DesktopWindow]
 
-    static func snapshot(primaryTop: CGFloat, includeOwn: Bool = false) -> DesktopScene {
+    static func existingWindowIDs() -> Set<Int>? {
+        guard let all = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]]
+        else { return nil }
+        return Set(all.compactMap { $0[kCGWindowNumber as String] as? Int })
+    }
+
+    static func snapshot(primaryTop: CGFloat, includeOwn: Bool = false,
+                         excludedOwners: Set<Int> = [], dockPID: Int? = nil) -> DesktopScene {
         let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
                                              kCGNullWindowID) as? [[String: Any]] ?? []
         let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
-        let dockPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
-            .first.map { Int($0.processIdentifier) }
         let windows = raw.compactMap { item -> DesktopWindow? in
             guard let id = item[kCGWindowNumber as String] as? Int,
                   let owner = item[kCGWindowOwnerPID as String] as? Int,
@@ -31,14 +37,15 @@ struct DesktopScene {
             guard layer == 0 || dock else { return nil }
             let frame = CGRect(x: rect.minX, y: primaryTop - rect.maxY,
                                width: rect.width, height: rect.height)
-            return DesktopWindow(id: id, frame: frame, layer: layer, dock: dock)
+            let supports = dock || (!excludedOwners.contains(owner) && rect.width >= 100 && rect.height >= 64)
+            return DesktopWindow(id: id, frame: frame, layer: layer, dock: dock, supportsSnow: supports)
         }
         return DesktopScene(windows: windows)
     }
 
     func isFullscreen(on screen: NSScreen, fullscreenPresentation: Bool) -> Bool {
         windows.contains { window in
-            window.layer == 0 && !window.dock &&
+            window.layer == 0 && window.supportsSnow && !window.dock &&
                 DisplayCoverage.isFullscreen(window: window.frame, screen: screen.frame,
                                              topInset: screen.safeAreaInsets.top,
                                              fullscreenPresentation: fullscreenPresentation)
@@ -55,7 +62,7 @@ struct DesktopScene {
         }
         var blockers: [CGRect] = []
         for window in normals.prefix(100) where window.frame.intersects(frame) {
-            if ledges.count < 55, let ledge = makeLedge(id: window.id, rect: window.frame,
+            if window.supportsSnow, ledges.count < 55, let ledge = makeLedge(id: window.id, rect: window.frame,
                                                        on: frame, coveredBy: blockers) {
                 ledges.append(ledge)
             }
@@ -79,7 +86,7 @@ struct DesktopScene {
         let innerRight = min(right, rect.maxX - corner)
         guard innerRight - innerLeft >= 2 else { return nil }
         var visible = [innerLeft...innerRight]
-        let band = CGRect(x: left - 14, y: rect.maxY - 1, width: right - left + 28, height: 88)
+        let band = CGRect(x: left - 14, y: rect.maxY - 18, width: right - left + 28, height: 105)
         let occluders = coveredBy.map { $0.intersection(band) }.filter { !$0.isNull && !$0.isEmpty }
         for blocker in occluders where blocker.minY <= rect.maxY + 0.5 && blocker.maxY > rect.maxY + 0.5 {
             visible = visible.flatMap { range in
@@ -103,13 +110,22 @@ final class SnowPanel: NSPanel {
 
 final class SnowView: NSView {
     var field: Snowfield
-    var cursor: CGPoint?
-    var onCancel: (() -> Void)?
+    private var cursor: CGPoint?
+    private var pressOrigin: CGPoint?
+    var hasSnowGesture: Bool { pressOrigin != nil }
     var onInputChanged: (() -> Void)?
     var snowColor = NSColor(srgbRed: 0.88, green: 0.94, blue: 1, alpha: 0.96)
     var particleScale: CGFloat = 1
     var particleOpacity: CGFloat = 0.92
     var flakeColor = NSColor.white
+    var garlandLedges: [Ledge] = []
+    var animateGarlands = true
+    private let bulbColors: [CGColor] = [
+        CGColor(red: 1, green: 0.34, blue: 0.31, alpha: 1),
+        CGColor(red: 1, green: 0.79, blue: 0.34, alpha: 1),
+        CGColor(red: 0.38, green: 0.89, blue: 0.64, alpha: 1),
+        CGColor(red: 0.36, green: 0.70, blue: 1, alpha: 1)
+    ]
     private let snowShadow = NSColor(srgbRed: 0.46, green: 0.62, blue: 0.76, alpha: 0.86)
     private let ink = NSColor(srgbRed: 0.16, green: 0.25, blue: 0.33, alpha: 0.95)
 
@@ -124,27 +140,50 @@ final class SnowView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         let point = global(event)
-        guard field.beginBall(at: point) else { return }
-        cursor = point
+        guard field.pickup(at: point) != nil else { return }
+        pressOrigin = point
         window?.makeFirstResponder(self)
         onInputChanged?()
-        needsDisplay = true
     }
 
     override func mouseDragged(with event: NSEvent) {
-        cursor = global(event)
+        guard let origin = pressOrigin else { return }
+        let point = global(event)
+        if field.held == nil, hypot(point.x - origin.x, point.y - origin.y) >= 5 {
+            _ = field.beginBall(at: origin)
+        }
+        if field.held != nil { cursor = point }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
-        _ = field.finishBall(at: global(event))
+        guard let origin = pressOrigin else { return }
+        if field.held != nil {
+            _ = field.finishBall(at: global(event))
+        } else if hypot(origin.x - global(event).x, origin.y - global(event).y) < 5 {
+            field.sweep(from: origin, to: CGPoint(x: origin.x - 8, y: origin.y))
+            field.sweep(from: origin, to: CGPoint(x: origin.x + 8, y: origin.y))
+        }
+        pressOrigin = nil
         cursor = nil
         onInputChanged?()
         needsDisplay = true
     }
 
+    func cancelGesture() {
+        field.cancelBall()
+        pressOrigin = nil
+        cursor = nil
+        window?.ignoresMouseEvents = true
+        needsDisplay = true
+    }
+
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 { onCancel?() } else { super.keyDown(with: event) }
+        if event.keyCode == 53 {
+            cancelGesture()
+        } else {
+            super.keyDown(with: event)
+        }
     }
 
     private func global(_ event: NSEvent) -> CGPoint {
@@ -168,8 +207,11 @@ final class SnowView: NSView {
                                       width: radius * 2, height: radius * 2))
         }
 
-        for drift in field.drifts.values.sorted(by: { $0.ledge.top < $1.ledge.top }) {
-            drawDrift(drift, in: cg)
+        for id in field.collisionOrder.reversed() {
+            if let drift = field.drifts[id] { drawDrift(drift, in: cg) }
+        }
+        for ledge in garlandLedges.reversed() {
+            drawGarland(on: ledge, in: cg)
         }
 
         for (index, ball) in field.balls.enumerated() where ball.radius > 0 {
@@ -236,6 +278,37 @@ final class SnowView: NSView {
         cg.addPath(path)
         cg.setFillColor(snowColor.cgColor)
         cg.fillPath()
+        cg.restoreGState()
+    }
+
+    private func drawGarland(on ledge: Ledge, in cg: CGContext) {
+        let width = ledge.frame.width - 30
+        let origin = local(CGPoint(x: ledge.frame.minX + 15, y: ledge.top + 2))
+        let sag = min(10, width * 0.04)
+        let bulbs = min(18, max(4, Int(width / 33)))
+        cg.saveGState()
+        clipCoveredAreas(of: ledge, in: cg)
+        cg.move(to: origin)
+        cg.addQuadCurve(to: CGPoint(x: origin.x + width, y: origin.y),
+                        control: CGPoint(x: origin.x + width * 0.5, y: origin.y - sag * 2))
+        cg.setStrokeColor(CGColor(red: 0.18, green: 0.32, blue: 0.28, alpha: 0.94))
+        cg.setLineWidth(1.5)
+        cg.strokePath()
+
+        for index in 1...bulbs {
+            let progress = CGFloat(index) / CGFloat(bulbs + 1)
+            let x = origin.x + width * progress
+            guard x >= -6 && x <= bounds.width + 6 else { continue }
+            let y = origin.y - 4 * sag * progress * (1 - progress) - 3.2
+            let color = bulbColors[index % bulbColors.count]
+            let power = animateGarlands ? 0.82 + 0.18 * sin(field.time * 1.1 + CGFloat(index) * 0.73) : 0.86
+            cg.setFillColor(color.copy(alpha: 0.18 * power) ?? color)
+            cg.fillEllipse(in: CGRect(x: x - 5, y: y - 5, width: 10, height: 10))
+            cg.setFillColor(color.copy(alpha: power) ?? color)
+            cg.fillEllipse(in: CGRect(x: x - 2, y: y - 2.5, width: 4, height: 5))
+            cg.setFillColor(CGColor(gray: 1, alpha: 0.74 * power))
+            cg.fillEllipse(in: CGRect(x: x - 0.5, y: y + 0.2, width: 1.5, height: 1.5))
+        }
         cg.restoreGState()
     }
 

@@ -44,15 +44,15 @@ require(field.ballCenter(1, on: moved)!.y > field.ballCenter(0, on: moved)!.y, "
 
 let beforeSweep = field.drifts[8]!.heights.reduce(0, +)
 field.sweep(from: CGPoint(x: -238, y: moved.top + 7),
-            to: CGPoint(x: -57, y: moved.top + 7), tool: .shovel)
-require(field.drifts[8]!.heights.reduce(0, +) < beforeSweep, "shovel should clear snow")
+            to: CGPoint(x: -57, y: moved.top + 7))
+require(field.drifts[8]!.heights.reduce(0, +) < beforeSweep, "cursor should move snow off the swept columns")
 
 field.updateLedges([ground])
 require(field.drifts[8] == nil && field.balls.allSatisfy { $0.radius == 0 }, "closed window removes attached snow")
 require(field.flakes.contains(where: \.detached), "released snow should fall")
 field.clear()
 require(field.flakes.isEmpty && field.balls.isEmpty && field.held == nil, "clear should reset snow")
-print("PASS: accumulation, occlusion, bounded particles, moved windows, sculpting, shovel, window close, clear.")
+print("PASS: accumulation, occlusion, bounded particles, moved windows, sculpting, sweep, window close, clear.")
 
 let monitor = CGRect(x: 0, y: 0, width: 1710, height: 1100)
 let notchedFullscreen = CGRect(x: 0, y: 0, width: 1710, height: 1061)
@@ -129,3 +129,56 @@ require(partiallyMasked.isVisible(140), "a window just above the ledge leaves it
 require(partiallyMasked.occluders.contains { $0.contains(CGPoint(x: 140, y: 135)) },
         "a floating foreground window still clips the upper part of the cap")
 print("PASS: rounded corners and full/partial foreground occlusion.")
+
+let physicsDisplay = CGRect(x: 0, y: 0, width: 440, height: 250)
+let physicsGround = Ledge(id: -1, frame: CGRect(x: 0, y: 0, width: 440, height: 1), visible: [0...440])
+let wide = Ledge(id: 30, frame: CGRect(x: 40, y: 90, width: 320, height: 75), visible: [40...360])
+let lower = Ledge(id: 31, frame: CGRect(x: 190, y: 42, width: 174, height: 38), visible: [190...364])
+var resizeField = Snowfield(bounds: physicsDisplay, seed: 71)
+resizeField.updateLedges([physicsGround, wide])
+for _ in 0..<680 { resizeField.step(1.0 / 30, rate: 110, wind: .zero) }
+resizeField.updateLedges([physicsGround, wide, lower])
+let wideSnow = resizeField.drifts[wide.id]!.heights
+let originalAmount = wideSnow.reduce(0, +)
+let narrower = Ledge(id: wide.id, frame: CGRect(x: 40, y: 90, width: 165, height: 75), visible: [40...205])
+resizeField.updateLedges([physicsGround, narrower, lower])
+let keptAmount = resizeField.drifts[wide.id]!.heights.reduce(0, +)
+let fallen = resizeField.flakes.filter(\.detached)
+require(keptAmount > 0 && fallen.contains { $0.position.x > narrower.frame.maxX },
+        "right-edge shrink keeps snow on the window and drops the removed portion")
+require(abs(keptAmount + fallen.map(\.snowAmount).reduce(0, +) - originalAmount) < 0.01,
+        "shrinking transfers the missing snow into airborne chunks")
+for _ in 0..<75 { resizeField.step(1.0 / 30, rate: 0, wind: .zero) }
+require(resizeField.drifts[lower.id]!.height(at: 270) > 5,
+        "shed snow piles up on the first exposed lower window")
+
+var leftResize = Snowfield(bounds: physicsDisplay, seed: 88)
+leftResize.updateLedges([physicsGround, wide])
+for _ in 0..<650 { leftResize.step(1.0 / 30, rate: 112, wind: .zero) }
+let beforeLeft = leftResize.drifts[wide.id]!
+let fromLeft = Ledge(id: wide.id, frame: CGRect(x: 117, y: 90, width: 243, height: 75), visible: [117...360])
+leftResize.updateLedges([physicsGround, fromLeft])
+require(abs(leftResize.drifts[wide.id]!.height(at: 262) - beforeLeft.height(at: 262)) < 2,
+        "left-edge shrink keeps the profile aligned to the fixed right edge")
+require(leftResize.flakes.contains { $0.detached && $0.position.x < fromLeft.frame.minX },
+        "left-edge shrink drops snow on the left")
+let parked = leftResize.drifts[wide.id]!.heights
+leftResize.updateLedges([physicsGround], retainedWindowIDs: [wide.id])
+require(leftResize.drifts[wide.id]!.ledge.visible.isEmpty, "a hidden existing window stops catching snow")
+leftResize.updateLedges([physicsGround, fromLeft], retainedWindowIDs: [wide.id])
+require(leftResize.drifts[wide.id]!.heights == parked, "snow returns when the window is visible again")
+
+var sweepField = Snowfield(bounds: physicsDisplay, seed: 93)
+sweepField.updateLedges([physicsGround, wide])
+for _ in 0..<550 { sweepField.step(1.0 / 30, rate: 100, wind: .zero) }
+sweepField.sweep(from: CGPoint(x: 130, y: wide.top + 5), to: CGPoint(x: 164, y: wide.top + 5))
+require(sweepField.flakes.contains { $0.detached && $0.lateralSpeed > 0 && $0.speed < 0 },
+        "rightward sweep throws material up and to the right")
+require(sweepField.pickup(at: CGPoint(x: 160, y: wide.top - 3)) == nil,
+        "the window title bar remains available to the window")
+
+let transient = DesktopWindow(id: 90, frame: CGRect(x: 20, y: 100, width: 160, height: 27),
+                              layer: 0, dock: false, supportsSnow: false)
+require(!DesktopScene(windows: [transient, back]).ledges(in: screen).contains { $0.id == transient.id },
+        "utility popups do not become surfaces")
+print("PASS: resize from both edges, falling mass, deposition, window persistence, lateral sweep, and surface filtering.")
