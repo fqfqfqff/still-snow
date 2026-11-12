@@ -5,6 +5,7 @@ struct Ledge: Equatable {
     let id: Int
     let frame: CGRect
     var visible: [ClosedRange<CGFloat>]
+    var occluders: [CGRect] = []
 
     var top: CGFloat { frame.maxY }
     func isVisible(_ x: CGFloat) -> Bool { visible.contains { $0.contains(x) } }
@@ -24,6 +25,15 @@ struct Snowfield {
     struct Drift {
         var ledge: Ledge
         var heights: [CGFloat]
+
+        func height(at x: CGFloat) -> CGFloat {
+            guard !heights.isEmpty else { return 0 }
+            let index = max(0, min(CGFloat(heights.count - 1), (x - ledge.frame.minX) / Snowfield.column - 0.5))
+            let left = Int(index)
+            let right = min(heights.count - 1, left + 1)
+            let fraction = index - CGFloat(left)
+            return heights[left] * (1 - fraction) + heights[right] * fraction
+        }
     }
 
     struct Ball {
@@ -33,7 +43,15 @@ struct Snowfield {
         var below: Int?
     }
 
+    struct Placement {
+        let ledge: Int
+        let below: Int?
+        let center: CGPoint
+        let radius: CGFloat
+    }
+
     static let column: CGFloat = 5
+    static let maximumHeight: CGFloat = 24
     let bounds: CGRect
     private(set) var drifts: [Int: Drift] = [:]
     private(set) var flakes: [Flake] = []
@@ -43,6 +61,7 @@ struct Snowfield {
     private var random: UInt64
     private var emission: CGFloat = 0
     private var time: CGFloat = 0
+    private var settleAt: CGFloat = 0
 
     init(bounds: CGRect, seed: UInt64 = 23) {
         self.bounds = bounds
@@ -111,47 +130,89 @@ struct Snowfield {
                                 speed: speed, radius: radius, phase: phase))
         }
 
-        let ledges: [Ledge] = drifts.values.map { $0.ledge }
-        let orderedLedges = ledges.sorted { first, second in
-            if first.top == second.top { return first.id < second.id }
-            return first.top > second.top
+        let orderedDrifts = drifts.values.sorted { first, second in
+            let a = first.ledge
+            let b = second.ledge
+            if a.top == b.top { return a.id < b.id }
+            return a.top > b.top
         }
         var remaining: [Flake] = []
         remaining.reserveCapacity(flakes.count)
 
         for var flake in flakes {
-            let oldY = flake.position.y
+            let previous = flake.position
             flake.position.x += (wind.dx + sin(time * 1.7 + flake.phase) * 13) * dt
             flake.position.y -= max(14, flake.speed - wind.dy) * dt
             if flake.position.x < bounds.minX { flake.position.x += bounds.width }
             if flake.position.x > bounds.maxX { flake.position.x -= bounds.width }
 
-            if let ledge = orderedLedges.first(where: {
-                oldY >= $0.top && flake.position.y <= $0.top && $0.isVisible(flake.position.x)
-            }) {
-                deposit(on: ledge, at: flake.position.x, radius: flake.radius)
+            var landing: (ledge: Ledge, x: CGFloat, height: CGFloat)?
+            let fall = previous.y - flake.position.y
+            if fall > 0 {
+                for drift in orderedDrifts {
+                    let ledge = drift.ledge
+                    guard previous.y >= ledge.top,
+                          flake.position.y <= ledge.top + Self.maximumHeight,
+                          ledge.isVisible(flake.position.x) else { continue }
+                    let surface = min(previous.y, ledge.top + drift.height(at: flake.position.x))
+                    guard flake.position.y <= surface, surface > (landing?.height ?? -.infinity) else { continue }
+                    let fraction = (previous.y - surface) / fall
+                    let crossedEdge = abs(flake.position.x - previous.x) > bounds.width / 2
+                    let x = crossedEdge ? flake.position.x : previous.x + (flake.position.x - previous.x) * fraction
+                    if ledge.isVisible(x) { landing = (ledge, x, surface) }
+                }
+            }
+            if let landing {
+                deposit(on: landing.ledge, at: landing.x, radius: flake.radius)
             } else if flake.position.y >= bounds.minY - 6 {
                 remaining.append(flake)
             }
         }
         flakes = remaining
+        if time >= settleAt {
+            settleAt = time + 0.10
+            settle()
+        }
+    }
+
+    private mutating func settle() {
+        for id in Array(drifts.keys) {
+            guard var drift = drifts[id], drift.heights.count > 1, !drift.ledge.visible.isEmpty else { continue }
+            for i in 0..<(drift.heights.count - 1) {
+                let x = drift.ledge.frame.minX + (CGFloat(i) + 0.5) * Self.column
+                guard drift.ledge.isVisible(x), drift.ledge.isVisible(x + Self.column) else { continue }
+                let difference = drift.heights[i] - drift.heights[i + 1]
+                let transfer = min(0.55, max(0, abs(difference) - 1.8) * 0.24)
+                guard transfer > 0 else { continue }
+                let signed = difference > 0 ? transfer : -transfer
+                drift.heights[i] -= signed
+                drift.heights[i + 1] += signed
+            }
+            drifts[id] = drift
+        }
     }
 
     private mutating func deposit(on ledge: Ledge, at x: CGFloat, radius: CGFloat) {
         guard var drift = drifts[ledge.id] else { return }
         let i = Int((x - ledge.frame.minX) / Self.column)
-        let ceiling: CGFloat = ledge.id < 0 ? 23 : 15
+        let ground = ledge.id == -1
+        let maximum: CGFloat = ground ? 20 : 11
         for offset in -2...2 where drift.heights.indices.contains(i + offset) {
             let n = i + offset
-            let amount = (0.6 + 0.28 * radius) / CGFloat(1 + abs(offset))
-            drift.heights[n] = min(ceiling, drift.heights[n] + amount)
+            let local = (CGFloat(n) + 0.5) * Self.column
+            guard ledge.isVisible(ledge.frame.minX + local) else { continue }
+            let ripple = sin(local * 0.043) * 1.2 + sin(local * 0.018) * 1.5
+            let taper = ground ? 1 : min(1, max(0.12, min(local, ledge.frame.width - local) / 22))
+            let ceiling = (maximum + ripple) * taper
+            let amount = (0.56 + 0.22 * radius) / CGFloat(1 + abs(offset))
+            drift.heights[n] += min(amount, max(0, ceiling - drift.heights[n]))
         }
         drifts[ledge.id] = drift
     }
 
     mutating func sweep(from: CGPoint, to: CGPoint, tool: SnowTool) {
         let travel = hypot(to.x - from.x, to.y - from.y)
-        guard travel > 0.5, travel < 240 else { return }
+        guard travel > 0.5 else { return }
         let reach: CGFloat = tool == .glove ? 12 : 20
         for id in drifts.keys.sorted() {
             guard var drift = drifts[id],
@@ -202,40 +263,68 @@ struct Snowfield {
         return true
     }
 
-    mutating func finishBall(at point: CGPoint) -> Bool {
-        guard let radius = held else { return false }
-        if balls.count >= 96 { compactBalls() }
-        guard balls.count < 96 else { cancelBall(); return false }
+    func placement(at point: CGPoint) -> Placement? {
+        guard let radius = held else { return nil }
+        var best: (placement: Placement, score: CGFloat)?
         for index in balls.indices.reversed() {
             let ball = balls[index]
-            guard ball.radius > 0, let ledge = drifts[ball.ledge]?.ledge,
-                  let center = ballCenter(index, on: ledge), ledge.isVisible(center.x),
-                  radius <= ball.radius + 2,
+            guard ball.radius > 0, let drift = drifts[ball.ledge],
+                  let support = ballCenter(index, on: drift.ledge),
+                  drift.ledge.isVisible(support.x),
                   !balls.contains(where: { $0.radius > 0 && $0.below == index }),
-                  abs(point.x - center.x) <= ball.radius + 9,
-                  abs(point.y - center.y - ball.radius) <= radius + 18 else { continue }
-            balls.append(Ball(x: ball.x, radius: radius, ledge: ball.ledge, below: index))
-            held = nil
-            take = nil
-            return true
+                  stackDepth(index) < 3 else { continue }
+            let fittedRadius = min(radius, ball.radius * 0.76)
+            let center = CGPoint(x: support.x, y: support.y + ball.radius + fittedRadius - 0.75)
+            let dx = abs(point.x - center.x)
+            guard dx <= ball.radius + 15, point.y >= support.y - 3,
+                  point.y <= center.y + fittedRadius + 16,
+                  !drift.ledge.occluders.contains(where: { $0.contains(center) }) else { continue }
+            let score = dx + abs(point.y - center.y) * 0.6
+            if score < (best?.score ?? .infinity) {
+                best = (Placement(ledge: ball.ledge, below: index, center: center, radius: fittedRadius), score)
+            }
         }
+        if let best { return best.placement }
 
-        let targets = drifts.values.filter {
-            $0.ledge.isVisible(point.x) && abs(point.y - $0.ledge.top) < 34
-        }.sorted {
-            let first = abs(point.y - $0.ledge.top)
-            let second = abs(point.y - $1.ledge.top)
-            return first == second ? $0.ledge.id < $1.ledge.id : first < second
+        let candidates = drifts.values.filter { $0.ledge.isVisible(point.x) }.sorted {
+            abs(point.y - $0.ledge.top - $0.height(at: point.x) - radius) <
+                abs(point.y - $1.ledge.top - $1.height(at: point.x) - radius)
         }
-        if let target = targets.first {
-            balls.append(Ball(x: point.x - target.ledge.frame.minX, radius: radius,
-                              ledge: target.ledge.id, below: nil))
-            held = nil
-            take = nil
-            return true
+        for drift in candidates {
+            let surface = drift.ledge.top + drift.height(at: point.x)
+            let center = CGPoint(x: point.x, y: surface + radius - 0.75)
+            guard point.y >= surface - 8, point.y <= center.y + radius + 12,
+                  !drift.ledge.occluders.contains(where: { $0.contains(center) }) else { continue }
+            let overlapping = balls.contains { ball in
+                ball.radius > 0 && ball.ledge == drift.ledge.id && ball.below == nil &&
+                abs(point.x - drift.ledge.frame.minX - ball.x) < ball.radius + radius - 1
+            }
+            if !overlapping {
+                return Placement(ledge: drift.ledge.id, below: nil, center: center, radius: radius)
+            }
         }
-        cancelBall()
-        return false
+        return nil
+    }
+
+    private func stackDepth(_ index: Int) -> Int {
+        var depth = 1
+        var below = balls[index].below
+        while let index = below {
+            depth += 1
+            below = balls[index].below
+        }
+        return depth
+    }
+
+    mutating func finishBall(at point: CGPoint) -> Bool {
+        if balls.count >= 96 { compactBalls() }
+        guard balls.count < 96, let position = placement(at: point),
+              let ledge = drifts[position.ledge]?.ledge else { cancelBall(); return false }
+        balls.append(Ball(x: position.center.x - ledge.frame.minX, radius: position.radius,
+                          ledge: position.ledge, below: position.below))
+        held = nil
+        take = nil
+        return true
     }
 
     private mutating func compactBalls() {
@@ -264,11 +353,11 @@ struct Snowfield {
         guard ball.radius > 0 else { return nil }
         let x = ledge.frame.minX + ball.x
         guard x <= ledge.frame.maxX else { return nil }
-        var y = ledge.top + ball.radius
+        var y = ledge.top + (drifts[ledge.id]?.height(at: x) ?? 0) + ball.radius - 0.75
         var below = ball.below
         while let i = below {
             guard balls[i].radius > 0 else { return nil }
-            y += balls[i].radius * 2 - 1
+            y += balls[i].radius * 2 - 0.75
             below = balls[i].below
         }
         return CGPoint(x: x, y: y)

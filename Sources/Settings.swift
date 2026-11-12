@@ -31,17 +31,7 @@ enum SnowStyle: String, CaseIterable, Identifiable {
         }
     )
 
-    private static let menuIcons = icons.mapValues { icon in
-        let result = NSImage(size: CGSize(width: 21, height: 21), flipped: false) { rect in
-            icon.draw(in: rect)
-            return true
-        }
-        result.accessibilityDescription = "Still Snow"
-        return result
-    }
-
     func appIcon(dark: Bool) -> NSImage? { Self.icons[resourceName(dark: dark)] }
-    func menuIcon(dark: Bool) -> NSImage? { Self.menuIcons[resourceName(dark: dark)] }
 
     private func resourceName(dark: Bool) -> String {
         self == .frost && dark ? "IconFrostDark" : iconName

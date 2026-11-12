@@ -72,3 +72,60 @@ require(DisplayCoverage.isFullscreen(window: notchedFullscreen, screen: monitor,
                                      fullscreenPresentation: true),
         "fullscreen presentation may leave a menu-bar-sized gap")
 print("PASS: fullscreen geometry including display insets and ordinary maximized windows.")
+
+var sculpt = Snowfield(bounds: display, seed: 37)
+sculpt.updateLedges([ground, window])
+for _ in 0..<960 { sculpt.step(1.0 / 30, rate: 150, wind: .zero) }
+let heights = sculpt.drifts[window.id]!.heights
+let edgeColumn = heights.indices.filter { heights[$0] >= 1.5 }.min { heights[$0] < heights[$1] }!
+let fullColumn = heights.indices.max { heights[$0] < heights[$1] }!
+func pilePoint(_ column: Int) -> CGPoint {
+    CGPoint(x: window.frame.minX + (CGFloat(column) + 0.5) * Snowfield.column, y: window.top + 5)
+}
+let basePoint = CGPoint(x: window.frame.midX, y: window.top + 10)
+require(sculpt.beginBall(at: pilePoint(edgeColumn)), "pick a small amount for the base")
+require(sculpt.finishBall(at: basePoint), "place the base on the actual drift")
+let baseCenter = sculpt.ballCenter(0, on: window)!
+let baseRadius = sculpt.balls[0].radius
+let snowHeight = sculpt.drifts[window.id]!.height(at: baseCenter.x)
+require(abs(baseCenter.y - baseRadius - (window.top + snowHeight - 0.75)) < 0.01,
+        "the base rests on the accumulated surface")
+require(sculpt.beginBall(at: pilePoint(fullColumn)), "pick a larger ball for the second tier")
+let held = sculpt.held!
+let slightlyOffCenter = CGPoint(x: baseCenter.x + 5, y: baseCenter.y + 1)
+let preview = sculpt.placement(at: slightlyOffCenter)!
+require(held > baseRadius && preview.below == 0 && preview.radius < baseRadius,
+        "an oversized upper ball snaps and fits")
+require(sculpt.finishBall(at: slightlyOffCenter), "commit the same placement shown in preview")
+require(hypot(sculpt.ballCenter(1, on: window)!.x - preview.center.x,
+              sculpt.ballCenter(1, on: window)!.y - preview.center.y) < 0.01,
+        "preview matches the installed ball exactly")
+let thirdColumn = heights.indices.filter { $0 != fullColumn && $0 != edgeColumn }.max { heights[$0] < heights[$1] }!
+require(sculpt.beginBall(at: pilePoint(thirdColumn)), "pick a third ball")
+let second = sculpt.ballCenter(1, on: window)!
+require(sculpt.finishBall(at: second), "snap a third ball on the same axis")
+require(sculpt.balls[2].below == 1 && sculpt.balls[0].x == sculpt.balls[2].x,
+        "all three balls share an axis")
+let fourthColumn = heights.indices.filter { ![fullColumn, edgeColumn, thirdColumn].contains($0) }
+    .max { heights[$0] < heights[$1] }!
+require(sculpt.beginBall(at: pilePoint(fourthColumn)), "pick a fourth ball")
+let top = sculpt.ballCenter(2, on: window)!
+require(!sculpt.finishBall(at: top), "a fourth ball cannot create an unstable stack")
+require(sculpt.held == nil && sculpt.balls.count == 3, "rejected placement cancels cleanly")
+print("PASS: surface contact, oversized ball fitting, exact preview, centered three-ball stack.")
+
+let back = DesktopWindow(id: 81, frame: CGRect(x: 15, y: 30, width: 220, height: 100), layer: 0, dock: false)
+let front = DesktopWindow(id: 82, frame: CGRect(x: 100, y: 90, width: 150, height: 120), layer: 0, dock: false)
+let screen = CGRect(x: 0, y: 0, width: 420, height: 300)
+let scene = DesktopScene(windows: [front, back])
+let backEdge = scene.ledges(in: screen).first { $0.id == back.id }!
+require(!backEdge.isVisible(16), "snow does not hang over the rounded corner")
+require(backEdge.isVisible(60) && !backEdge.isVisible(140), "overlap hides the covered ledge")
+require(backEdge.occluders.contains { $0.contains(CGPoint(x: 140, y: 145)) },
+        "foreground rectangles clip both the snow cap and the snowman")
+let highFront = DesktopWindow(id: 83, frame: CGRect(x: 100, y: 134, width: 150, height: 100), layer: 0, dock: false)
+let partiallyMasked = DesktopScene(windows: [highFront, back]).ledges(in: screen).first { $0.id == back.id }!
+require(partiallyMasked.isVisible(140), "a window just above the ledge leaves its base exposed")
+require(partiallyMasked.occluders.contains { $0.contains(CGPoint(x: 140, y: 135)) },
+        "a floating foreground window still clips the upper part of the cap")
+print("PASS: rounded corners and full/partial foreground occlusion.")

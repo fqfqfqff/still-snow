@@ -156,7 +156,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDe
         let dt = now - lastTick
         lastTick = now
         guard now >= spaceTransitionEnds, let main = NSScreen.screens.first else { return }
-        if now - lastSnapshot >= (NSEvent.pressedMouseButtons == 0 ? 0.22 : 0.07) {
+        if now - lastSnapshot >= (NSEvent.pressedMouseButtons == 0 ? 0.18 : 1.0 / 30) {
             lastSnapshot = now
             var scene = DesktopScene.snapshot(primaryTop: main.frame.maxY, includeOwn: verifyPath != nil)
             if verifyIsolatedWindow, let sample = verifyWindow {
@@ -171,13 +171,15 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDe
                     if overlay.view.field.held != nil { endSculpting() }
                     overlay.panel.orderOut(nil)
                 } else {
-                    let ledges = scene.ledges(on: overlay.screen).filter { preferences.accumulate || $0.id == -1 }
+                    let ledges = scene.ledges(in: overlay.screen.frame).filter { preferences.accumulate || $0.id == -1 }
                     overlay.view.field.updateLedges(ledges)
                     if !overlay.panel.isVisible { overlay.panel.orderFrontRegardless() }
                 }
             }
         }
-        if sculpting && now > sculptingDeadline { endSculpting() }
+        if sculpting && now > sculptingDeadline && !overlays.contains(where: { $0.view.field.held != nil }) {
+            endSculpting()
+        }
         let point = NSEvent.mouseLocation
         let wind = CGVector(dx: CGFloat(horizontal) * 54, dy: CGFloat(vertical) * 19)
         let rates: [CGFloat] = [25, 64, 150]
@@ -185,7 +187,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDe
         for overlay in overlays where overlay.panel.isVisible {
             let area = min(1.5, max(0.35, overlay.screen.frame.width / 1440))
             overlay.view.field.step(dt, rate: rates[weather] * area * energy / CGFloat(max(1, overlays.count)), wind: wind)
-            if !sculpting, let previous = lastMouse, overlay.screen.frame.contains(point) {
+            if !sculpting, let previous = lastMouse,
+               overlay.screen.frame.contains(previous), overlay.screen.frame.contains(point) {
                 overlay.view.field.sweep(from: previous, to: point, tool: tool)
             }
             overlay.view.needsDisplay = true
@@ -199,23 +202,21 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDe
     }
 
     private func refreshInput() {
+        guard sculpting else { return }
         let point = NSEvent.mouseLocation
         let dragging = overlays.contains { $0.view.field.held != nil }
         for overlay in overlays {
             let held = overlay.view.field.held != nil
             let canPick = overlay.screen.frame.contains(point) && overlay.view.field.pickup(at: point) != nil
-            overlay.panel.ignoresMouseEvents = !sculpting || !overlay.panel.isVisible || !(held || (!dragging && canPick))
+            overlay.panel.ignoresMouseEvents = !overlay.panel.isVisible || !(held || (!dragging && canPick))
         }
     }
 
     private func refreshAppearance() {
-        if !sculpting, !paused, let icon = preferences.icon.menuIcon(dark: darkAppearance) {
-            item?.button?.image = icon
-        } else {
-            let name = sculpting ? "hand.draw" : (paused ? "pause.circle" : "snowflake")
-            item?.button?.image = NSImage(systemSymbolName: name, accessibilityDescription: "Still Snow")
-            item?.button?.image?.isTemplate = true
-        }
+        let symbol = sculpting ? "hand.draw" : (paused ? "pause.circle" : "snowflake")
+        let icon = NSImage(systemSymbolName: symbol, accessibilityDescription: "Still Snow")
+        icon?.isTemplate = true
+        item?.button?.image = icon
         item?.button?.toolTip = sculpting
             ? tr("Snowman mode · Esc to exit", "Лепка снеговика · Esc для выхода")
             : "Still Snow"
@@ -468,7 +469,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSMenuDelegate, NSWindowDe
         }
         if !overlay.panel.isVisible { issues.append("Overlay is hidden") }
         if !overlay.panel.ignoresMouseEvents { issues.append("Normal overlay accepts mouse events") }
-        if item?.button?.image == nil { issues.append("No status item icon") }
+        if item?.button?.image?.isTemplate != true { issues.append("Status item icon is not monochrome") }
         if SnowStyle.allCases.contains(where: { $0.appIcon(dark: false) == nil || $0.appIcon(dark: true) == nil }) {
             issues.append("Missing one or more icon variants")
         }
