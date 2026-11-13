@@ -201,3 +201,40 @@ require(pushedSnow, "the plow pushes settled snow back into the simulation")
 plowField.step(1.0 / 60, rate: 0, wind: .zero, plowsEnabled: false)
 require(plowField.plow == nil, "turning off plows removes the active vehicle")
 print("PASS: plow scheduling, displaced snow, and disabling the vehicle.")
+
+var gestureField = Snowfield(bounds: physicsDisplay, seed: 93)
+gestureField.updateLedges([physicsGround, wide])
+for _ in 0..<550 { gestureField.step(1.0 / 30, rate: 100, wind: .zero) }
+let target = CGPoint(x: 164, y: wide.top + 4)
+let beforeHover = gestureField.drifts[wide.id]!.heights.reduce(0, +)
+for x in 130...164 {
+    gestureField.sweep(from: CGPoint(x: CGFloat(x) - 0.65, y: target.y),
+                       to: CGPoint(x: CGFloat(x), y: target.y), preservePickup: true)
+}
+require(gestureField.drifts[wide.id]!.heights.reduce(0, +) < beforeHover,
+        "slow hover movement displaces snow")
+require(gestureField.beginBall(at: target), "a click can still reserve snow after hovering")
+for _ in 0..<40 { gestureField.step(1.0 / 60, rate: 0, wind: .zero) }
+require(gestureField.finishBall(at: CGPoint(x: 250, y: wide.top + 14)),
+        "snow reserved on mouse down remains available through the drag")
+print("PASS: slow hover, pickup after hover, and ball placement.")
+
+let parkedWindow = DesktopWindow(id: back.id, frame: CGRect(x: 40, y: -95, width: 180, height: 115),
+                                 layer: 0, dock: false)
+let parkedScene = DesktopScene(windows: [parkedWindow])
+require(!parkedScene.ledges(in: screen).contains { $0.id == back.id },
+        "the visible sliver of a parked window does not carry snow onscreen")
+print("PASS: parked window slivers are excluded from the rendered snow scene.")
+
+var desktopTransition = DesktopTransition()
+require(desktopTransition.unsettledWindows(in: [back], now: 0, dragging: false).isEmpty,
+        "ordinary windows are visible")
+require(desktopTransition.unsettledWindows(in: [parkedWindow], now: 0.15, dragging: false) == [back.id],
+        "a window jumping to the edge is temporarily hidden")
+require(desktopTransition.unsettledWindows(in: [back], now: 0.30, dragging: false) == [back.id],
+        "the returning window remains hidden through the animation")
+require(desktopTransition.unsettledWindows(in: [back], now: 0.61, dragging: false).isEmpty,
+        "the settled window can show its original snow")
+require(desktopTransition.unsettledWindows(in: [parkedWindow], now: 0.63, dragging: true).isEmpty,
+        "dragging a window updates the snow immediately")
+print("PASS: desktop transition, settled return, and live window dragging.")

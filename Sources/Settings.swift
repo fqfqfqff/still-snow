@@ -411,8 +411,8 @@ struct SnowControlPanel: View {
                         }
                     }
                 }
-                Text(tr("Move the pointer through snow to sweep it. Click to scatter it, or drag from a drift to roll a ball.",
-                        "Проведи курсором, чтобы сдвинуть снег. Клик разбросает его, а зажатие и перетаскивание слепит шар."))
+                Text(tr("Move the pointer through snow to sweep it. Click snow on a window to scatter it, or drag from a drift to roll a ball.",
+                        "Проведи курсором, чтобы сдвинуть снег. Клик по сугробу на окне разбросает снег. Зажми и потяни снег, чтобы слепить шар."))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Toggle(tr("Garlands on windows", "Гирлянды на окнах"), isOn: $preferences.garlands)

@@ -459,9 +459,10 @@ struct Snowfield {
         return remaining
     }
 
-    mutating func sweep(from: CGPoint, to: CGPoint) {
+    mutating func sweep(from: CGPoint, to: CGPoint, preservePickup: Bool = false) {
         let travel = hypot(to.x - from.x, to.y - from.y)
-        guard travel > 0.5 else { return }
+        guard travel > 0.25 else { return }
+        let protected = preservePickup ? pickup(at: to) : nil
         let reach: CGFloat = 14
         let horizontal = to.x - from.x
         let shove = min(155, 72 + travel * 3)
@@ -480,13 +481,18 @@ struct Snowfield {
                     (y - from.y) * (to.y - from.y)) / (travel * travel)))
                 let distance = hypot(x - (from.x + t * (to.x - from.x)), y - (from.y + t * (to.y - from.y)))
                 guard distance < reach else { continue }
-                let removed = min(drift.heights[i], (1 - distance / reach) * min(2.4, travel * 0.23))
-                guard removed >= 0.16 else { continue }
+                let reserve = protected?.0 == id && protected?.1 == i
+                    ? max(1.5, to.y - drift.ledge.top) : 0
+                let removed = min(max(0, drift.heights[i] - reserve),
+                                  (1 - distance / reach) * min(2.4, travel * 0.35))
+                guard removed >= 0.045 else { continue }
                 drift.heights[i] -= removed
                 unsettled.insert(id)
                 let direction: CGFloat = (abs(horizontal) >= 1 ? horizontal : x - to.x) < 0 ? -1 : 1
                 let crest = drift.ledge.top + drift.heights[i] + removed
-                shed(x: x + direction * 4, y: crest + 1, amount: removed, sideways: direction * shove)
+                let launchX = x + direction * 6
+                let launchY = max(crest, drift.ledge.top + drift.height(at: launchX)) + 2
+                shed(x: launchX, y: launchY, amount: removed, sideways: direction * shove)
             }
             drifts[id] = drift
         }
@@ -498,7 +504,7 @@ struct Snowfield {
                   point.y >= drift.ledge.top - 0.8,
                   point.y <= drift.ledge.top + drift.height(at: point.x) + 4,
                   !drift.ledge.occluders.contains(where: { $0.contains(point) }) else { continue }
-            let index = Int((point.x - drift.ledge.frame.minX) / Self.column)
+            let index = min(drift.heights.count - 1, Int((point.x - drift.ledge.frame.minX) / Self.column))
             if drift.heights.indices.contains(index), drift.heights[index] >= 1.5 {
                 return (id, index)
             }

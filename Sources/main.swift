@@ -22,6 +22,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var lastSnapshot: TimeInterval = -.infinity
     private var lastMouse: CGPoint?
     private var fullscreen: Set<NSNumber> = []
+    private var desktopTransition = DesktopTransition()
     private var spaceTransitionEnds: TimeInterval = 0
     private var paused: Bool { preferences.paused }
     private var lastKnownWindowCheck: TimeInterval = -.infinity
@@ -178,6 +179,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             fullscreen = Set(overlays.filter {
                 scene.isFullscreen(on: $0.screen, fullscreenPresentation: fullscreenPresentation)
             }.map { screenID($0.screen) })
+            let transitioning = desktopTransition.unsettledWindows(
+                in: scene.windows, now: now, dragging: pressed && lastMouse != point && !ownGesture)
             let onScreen = Set(scene.windows.map(\.id))
             let missing = Set(overlays.flatMap { $0.view.field.drifts.keys.filter { $0 > 0 } }).subtracting(onScreen)
             if !missing.isEmpty && (!missing.isSubset(of: checkedMissingWindows) || now - lastKnownWindowCheck >= 0.45) {
@@ -191,7 +194,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if overlay.view.hasSnowGesture { overlay.view.cancelGesture() }
                     if overlay.panel.isVisible { overlay.panel.orderOut(nil) }
                 } else {
-                    let surfaces = scene.ledges(in: overlay.screen.frame)
+                    let surfaces = scene.ledges(in: overlay.screen.frame).filter { !transitioning.contains($0.id) }
                     let ledges = preferences.accumulate ? surfaces : surfaces.filter { $0.id == -1 }
                     if preferences.garlands {
                         overlay.view.garlandLedges = Array(surfaces.lazy.filter {
@@ -213,7 +216,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                                          wind: wind, plowsEnabled: preferences.snowplows && !reduceMotion)
             if !pressed, !ownGesture, controlPopover?.isShown != true, let previous = lastMouse,
                overlay.screen.frame.contains(previous), overlay.screen.frame.contains(point) {
-                overlay.view.field.sweep(from: previous, to: point)
+                overlay.view.field.sweep(from: previous, to: point, preservePickup: true)
             }
             overlay.view.needsDisplay = true
         }
@@ -348,7 +351,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     @objc private func spaceChanged() {
         cancelSnowGestures()
-        spaceTransitionEnds = ProcessInfo.processInfo.systemUptime + 0.45
+        desktopTransition = DesktopTransition()
+        spaceTransitionEnds = ProcessInfo.processInfo.systemUptime + 0.55
         rebuildOverlays()
     }
 

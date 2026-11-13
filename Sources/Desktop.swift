@@ -9,6 +9,27 @@ struct DesktopWindow {
     var supportsSnow = true
 }
 
+struct DesktopTransition {
+    private var previousFrames: [Int: CGRect] = [:]
+    private var movingUntil: [Int: TimeInterval] = [:]
+
+    mutating func unsettledWindows(in windows: [DesktopWindow], now: TimeInterval,
+                                   dragging: Bool) -> Set<Int> {
+        var frames: [Int: CGRect] = [:]
+        for window in windows where window.supportsSnow && !window.dock {
+            frames[window.id] = window.frame
+            guard !dragging, let before = previousFrames[window.id] else { continue }
+            let distance = hypot(window.frame.minX - before.minX, window.frame.minY - before.minY)
+            if distance >= 80 || (distance >= 2 && movingUntil[window.id, default: 0] > now) {
+                movingUntil[window.id] = now + 0.28
+            }
+        }
+        previousFrames = frames
+        movingUntil = movingUntil.filter { !dragging && $0.value > now && frames[$0.key] != nil }
+        return Set(movingUntil.keys)
+    }
+}
+
 struct DesktopScene {
     var windows: [DesktopWindow]
 
@@ -76,6 +97,12 @@ struct DesktopScene {
     }
 
     private func makeLedge(id: Int, rect: CGRect, on screen: CGRect, coveredBy: [CGRect]) -> Ledge? {
+        // Show Desktop leaves a sliver of each parked window at the screen edge.
+        let intersection = rect.intersection(screen)
+        if id > 0 && (intersection.height < min(42, rect.height * 0.33) ||
+                      intersection.width < min(42, rect.width * 0.33)) {
+            return nil
+        }
         let left = max(screen.minX, rect.minX)
         let right = min(screen.maxX, rect.maxX)
         guard right - left >= 2, rect.maxY >= screen.minY, rect.maxY <= screen.maxY - 2 else {
@@ -86,7 +113,7 @@ struct DesktopScene {
         let innerRight = min(right, rect.maxX - corner)
         guard innerRight - innerLeft >= 2 else { return nil }
         var visible = [innerLeft...innerRight]
-        let band = CGRect(x: left - 14, y: rect.maxY - 18, width: right - left + 28, height: 105)
+        let band = CGRect(x: left - 14, y: rect.maxY - 36, width: right - left + 28, height: 123)
         let occluders = coveredBy.map { $0.intersection(band) }.filter { !$0.isNull && !$0.isEmpty }
         for blocker in occluders where blocker.minY <= rect.maxY + 0.5 && blocker.maxY > rect.maxY + 0.5 {
             visible = visible.flatMap { range in
@@ -112,6 +139,7 @@ final class SnowView: NSView {
     var field: Snowfield
     private var cursor: CGPoint?
     private var pressOrigin: CGPoint?
+    private var draggingBall = false
     var hasSnowGesture: Bool { pressOrigin != nil }
     var onInputChanged: (() -> Void)?
     var snowColor = NSColor(srgbRed: 0.88, green: 0.94, blue: 1, alpha: 0.96)
@@ -136,11 +164,12 @@ final class SnowView: NSView {
 
     required init?(coder: NSCoder) { nil }
     override var acceptsFirstResponder: Bool { true }
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var needsPanelToBecomeKey: Bool { true }
 
     override func mouseDown(with event: NSEvent) {
         let point = global(event)
-        guard field.pickup(at: point) != nil else { return }
+        guard field.beginBall(at: point) else { return }
         pressOrigin = point
         window?.makeFirstResponder(self)
         onInputChanged?()
@@ -149,21 +178,24 @@ final class SnowView: NSView {
     override func mouseDragged(with event: NSEvent) {
         guard let origin = pressOrigin else { return }
         let point = global(event)
-        if field.held == nil, hypot(point.x - origin.x, point.y - origin.y) >= 5 {
-            _ = field.beginBall(at: origin)
-        }
-        if field.held != nil { cursor = point }
+        if hypot(point.x - origin.x, point.y - origin.y) >= 5 { draggingBall = true }
+        if draggingBall, field.held != nil { cursor = point }
         needsDisplay = true
     }
 
     override func mouseUp(with event: NSEvent) {
         guard let origin = pressOrigin else { return }
-        if field.held != nil {
-            _ = field.finishBall(at: global(event))
-        } else if hypot(origin.x - global(event).x, origin.y - global(event).y) < 5 {
-            field.sweep(from: origin, to: CGPoint(x: origin.x - 8, y: origin.y))
-            field.sweep(from: origin, to: CGPoint(x: origin.x + 8, y: origin.y))
+        let point = global(event)
+        if draggingBall || hypot(point.x - origin.x, point.y - origin.y) >= 5 {
+            _ = field.finishBall(at: point)
+        } else {
+            field.cancelBall()
+            if let (ledgeID, _) = field.pickup(at: origin), ledgeID != -1 {
+                field.sweep(from: origin, to: CGPoint(x: origin.x - 9, y: origin.y))
+                field.sweep(from: origin, to: CGPoint(x: origin.x + 9, y: origin.y))
+            }
         }
+        draggingBall = false
         pressOrigin = nil
         cursor = nil
         onInputChanged?()
@@ -172,6 +204,7 @@ final class SnowView: NSView {
 
     func cancelGesture() {
         field.cancelBall()
+        draggingBall = false
         pressOrigin = nil
         cursor = nil
         window?.ignoresMouseEvents = true
@@ -327,33 +360,73 @@ final class SnowView: NSView {
         cg.restoreGState()
     }
 
+    private lazy var bulbGlows = bulbColors.map { color in
+        CGGradient(colorsSpace: CGColorSpaceCreateDeviceRGB(),
+                   colors: [color.copy(alpha: 0.42) ?? color,
+                            color.copy(alpha: 0) ?? color] as CFArray, locations: [0, 1])
+    }
+
     private func drawGarland(on ledge: Ledge, in cg: CGContext) {
-        let width = ledge.frame.width - 30
-        let origin = local(CGPoint(x: ledge.frame.minX + 15, y: ledge.top + 2))
-        let sag = min(10, width * 0.04)
-        let bulbs = min(18, max(4, Int(width / 33)))
+        let width = ledge.frame.width - 36
+        guard width >= 54 else { return }
+        let origin = local(CGPoint(x: ledge.frame.minX + 18, y: ledge.top - 3))
+        let loops = max(1, Int((width / 135).rounded()))
+        let span = width / CGFloat(loops)
+        let sag = min(12, span * 0.11)
+        let wire = CGMutablePath()
         cg.saveGState()
         clipCoveredAreas(of: ledge, in: cg)
-        cg.move(to: origin)
-        cg.addQuadCurve(to: CGPoint(x: origin.x + width, y: origin.y),
-                        control: CGPoint(x: origin.x + width * 0.5, y: origin.y - sag * 2))
-        cg.setStrokeColor(CGColor(red: 0.18, green: 0.32, blue: 0.28, alpha: 0.94))
-        cg.setLineWidth(1.5)
+
+        for loop in 0..<loops {
+            let x = origin.x + CGFloat(loop) * span
+            wire.move(to: CGPoint(x: x, y: origin.y))
+            wire.addQuadCurve(to: CGPoint(x: x + span, y: origin.y),
+                              control: CGPoint(x: x + span / 2, y: origin.y - sag * 2))
+        }
+        cg.setLineCap(.round)
+        cg.setStrokeColor(CGColor(red: 0.05, green: 0.12, blue: 0.12, alpha: 0.94))
+        cg.setLineWidth(2.1)
+        cg.addPath(wire)
+        cg.strokePath()
+        cg.setStrokeColor(CGColor(red: 0.41, green: 0.57, blue: 0.49, alpha: 0.7))
+        cg.setLineWidth(0.65)
+        cg.addPath(wire)
         cg.strokePath()
 
-        for index in 1...bulbs {
-            let progress = CGFloat(index) / CGFloat(bulbs + 1)
-            let x = origin.x + width * progress
-            guard x >= -6 && x <= bounds.width + 6 else { continue }
-            let y = origin.y - 4 * sag * progress * (1 - progress) - 3.2
-            let color = bulbColors[index % bulbColors.count]
-            let power = animateGarlands ? 0.82 + 0.18 * sin(field.time * 1.1 + CGFloat(index) * 0.73) : 0.86
-            cg.setFillColor(color.copy(alpha: 0.18 * power) ?? color)
-            cg.fillEllipse(in: CGRect(x: x - 5, y: y - 5, width: 10, height: 10))
-            cg.setFillColor(color.copy(alpha: power) ?? color)
-            cg.fillEllipse(in: CGRect(x: x - 2, y: y - 2.5, width: 4, height: 5))
-            cg.setFillColor(CGColor(gray: 1, alpha: 0.74 * power))
-            cg.fillEllipse(in: CGRect(x: x - 0.5, y: y + 0.2, width: 1.5, height: 1.5))
+        cg.setFillColor(CGColor(red: 0.57, green: 0.66, blue: 0.61, alpha: 1))
+        for anchor in 0...loops {
+            let x = origin.x + CGFloat(anchor) * span
+            cg.fillEllipse(in: CGRect(x: x - 1.75, y: origin.y - 1.3, width: 3.5, height: 2.6))
+        }
+
+        let bulbsPerLoop = max(2, min(5, Int(span / 22)))
+        for loop in 0..<loops {
+            for bulb in 0..<bulbsPerLoop {
+                let index = loop * bulbsPerLoop + bulb
+                let progress = (CGFloat(bulb) + 0.5) / CGFloat(bulbsPerLoop)
+                let x = origin.x + span * (CGFloat(loop) + progress)
+                guard x >= -12 && x <= bounds.width + 12 else { continue }
+                let y = origin.y - 4 * sag * progress * (1 - progress)
+                let center = CGPoint(x: x, y: y - 5.3)
+                let colorIndex = index % bulbColors.count
+                let color = bulbColors[colorIndex]
+                let power = animateGarlands ? 0.86 + 0.14 * sin(field.time * 0.95 + CGFloat(index) * 0.63) : 0.93
+
+                if let glow = bulbGlows[colorIndex] {
+                    cg.saveGState()
+                    cg.setAlpha(power)
+                    cg.clip(to: CGRect(x: center.x - 10, y: center.y - 10, width: 20, height: 20))
+                    cg.drawRadialGradient(glow, startCenter: center, startRadius: 0,
+                                          endCenter: center, endRadius: 10, options: [])
+                    cg.restoreGState()
+                }
+                cg.setFillColor(CGColor(red: 0.11, green: 0.21, blue: 0.18, alpha: 1))
+                cg.fill(CGRect(x: x - 1.6, y: y - 3.4, width: 3.2, height: 3.6))
+                cg.setFillColor(color.copy(alpha: power) ?? color)
+                cg.fillEllipse(in: CGRect(x: x - 2.15, y: y - 8.8, width: 4.3, height: 6.1))
+                cg.setFillColor(CGColor(gray: 1, alpha: 0.8 * power))
+                cg.fillEllipse(in: CGRect(x: x - 1.05, y: y - 6.4, width: 1.45, height: 2.5))
+            }
         }
         cg.restoreGState()
     }
