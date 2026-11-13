@@ -31,6 +31,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var excludedOwners = Set<Int>()
     private var dockPID: Int?
     private var lowPower = false
+    private var reduceMotion = false
     private var sleeping = false
     private var activeSession = true
 
@@ -72,6 +73,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             name: Notification.Name("com.apple.screenIsLocked"), object: nil)
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(unlockScreen),
             name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        workspace.addObserver(self, selector: #selector(motionChanged),
+                              name: NSWorkspace.accessibilityDisplayOptionsDidChangeNotification, object: nil)
         NotificationCenter.default.addObserver(self, selector: #selector(powerChanged),
             name: Notification.Name.NSProcessInfoPowerStateDidChange, object: nil)
 
@@ -144,7 +147,9 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         lastTick = ProcessInfo.processInfo.systemUptime
         lowPower = ProcessInfo.processInfo.isLowPowerModeEnabled
-        let timer = Timer(timeInterval: lowPower ? 1.0 / 30 : 1.0 / 60,
+        reduceMotion = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        let frameInterval: TimeInterval = lowPower || reduceMotion || overlays.count > 1 ? 1.0 / 30 : 1.0 / 60
+        let timer = Timer(timeInterval: frameInterval,
                           target: self, selector: #selector(tick), userInfo: nil, repeats: true)
         timer.tolerance = 0.001
         self.timer = timer
@@ -160,10 +165,6 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let ownGesture = overlays.contains { $0.view.hasSnowGesture }
         let trackingWindow = pressed && !ownGesture && (lastMouse != point || now - lastSnapshot > 0.065)
         let dt = now - lastTick
-        if !trackingWindow && dt < (lowPower ? 0.050 : 0.028) && lastSnapshot.isFinite {
-            refreshInput()
-            return
-        }
         lastTick = now
         if trackingWindow || now - lastSnapshot >= 0.15 {
             lastSnapshot = now
@@ -208,7 +209,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let energy: CGFloat = lowPower ? 0.67 : 1
         for overlay in overlays where overlay.panel.isVisible {
             let area = min(1.5, max(0.35, overlay.screen.frame.width / 1440))
-            overlay.view.field.step(dt, rate: rates[preferences.weather] * area * energy / CGFloat(max(1, overlays.count)), wind: wind)
+            overlay.view.field.step(dt, rate: rates[preferences.weather] * area * energy / CGFloat(max(1, overlays.count)),
+                                         wind: wind, plowsEnabled: preferences.snowplows && !reduceMotion)
             if !pressed, !ownGesture, controlPopover?.isShown != true, let previous = lastMouse,
                overlay.screen.frame.contains(previous), overlay.screen.frame.contains(point) {
                 overlay.view.field.sweep(from: previous, to: point)
@@ -336,6 +338,12 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     @objc private func lockScreen() { sessionInactive() }
     @objc private func unlockScreen() { sessionActive() }
     @objc private func powerChanged() { schedule() }
+    @objc private func motionChanged() {
+        for overlay in overlays {
+            overlay.view.animateGarlands = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        }
+        schedule()
+    }
     @objc private func frontmostChanged() { lastSnapshot = -.infinity }
 
     @objc private func spaceChanged() {

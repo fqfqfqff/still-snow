@@ -182,3 +182,22 @@ let transient = DesktopWindow(id: 90, frame: CGRect(x: 20, y: 100, width: 160, h
 require(!DesktopScene(windows: [transient, back]).ledges(in: screen).contains { $0.id == transient.id },
         "utility popups do not become surfaces")
 print("PASS: resize from both edges, falling mass, deposition, window persistence, lateral sweep, and surface filtering.")
+
+var plowField = Snowfield(bounds: physicsDisplay, seed: 131)
+plowField.updateLedges([physicsGround, wide])
+for _ in 0..<1800 where plowField.plow == nil {
+    plowField.step(1.0 / 60, rate: 150, wind: .zero, plowsEnabled: true)
+}
+require(plowField.plow != nil, "a plow occasionally starts on a wide snowy surface")
+let vehicle = plowField.plow!
+var pushedSnow = false
+for _ in 0..<150 {
+    plowField.step(1.0 / 60, rate: 0, wind: .zero, plowsEnabled: true)
+    pushedSnow = pushedSnow || plowField.flakes.contains {
+        $0.detached && $0.lateralSpeed * vehicle.direction > 40
+    }
+}
+require(pushedSnow, "the plow pushes settled snow back into the simulation")
+plowField.step(1.0 / 60, rate: 0, wind: .zero, plowsEnabled: false)
+require(plowField.plow == nil, "turning off plows removes the active vehicle")
+print("PASS: plow scheduling, displaced snow, and disabling the vehicle.")

@@ -36,6 +36,14 @@ struct Snowfield {
         }
     }
 
+    struct Plow {
+        static let halfWidth: CGFloat = 13
+        let ledgeID: Int
+        let direction: CGFloat
+        var x: CGFloat
+        let destination: CGFloat
+    }
+
     struct Ball {
         var x: CGFloat
         var radius: CGFloat
@@ -55,6 +63,9 @@ struct Snowfield {
     let bounds: CGRect
     private(set) var drifts: [Int: Drift] = [:]
     private(set) var flakes: [Flake] = []
+    private var nextFlakes: [Flake] = []
+    private(set) var plow: Plow?
+    private var nextPlowTime: CGFloat = 19
     private(set) var balls: [Ball] = []
     private(set) var held: CGFloat?
     private var take: (id: Int, column: Int, amount: CGFloat)?
@@ -222,7 +233,7 @@ struct Snowfield {
                             snowAmount: amount, lateralSpeed: sideways))
     }
 
-    mutating func step(_ dt: CGFloat, rate: CGFloat, wind: CGVector) {
+    mutating func step(_ dt: CGFloat, rate: CGFloat, wind: CGVector, plowsEnabled: Bool = false) {
         let dt = min(max(dt, 0), 1.0 / 15)
         time += dt
         emission += rate * dt
@@ -237,8 +248,8 @@ struct Snowfield {
                                 speed: speed, radius: radius, phase: phase))
         }
 
-        var remaining: [Flake] = []
-        remaining.reserveCapacity(flakes.count)
+        nextFlakes.removeAll(keepingCapacity: true)
+        nextFlakes.reserveCapacity(flakes.count)
 
         for var flake in flakes {
             let previous = flake.position
@@ -258,16 +269,24 @@ struct Snowfield {
             var landing: (ledge: Ledge, x: CGFloat, height: CGFloat)?
             let fall = previous.y - flake.position.y
             if fall > 0 {
+                let wrapped = abs(flake.position.x - previous.x) > bounds.width / 2
+                let startX = wrapped ? flake.position.x : previous.x
+                let endX = flake.position.x
+                let minX = min(startX, endX)
+                let maxX = max(startX, endX)
                 for id in collisionOrder {
                     guard let drift = drifts[id] else { continue }
                     let ledge = drift.ledge
                     if flake.position.y > ledge.top + Self.maximumHeight { break }
-                    guard previous.y >= ledge.top, ledge.isVisible(flake.position.x) else { continue }
-                    let surface = min(previous.y, ledge.top + drift.height(at: flake.position.x))
+                    guard previous.y >= ledge.top else { continue }
+                    guard ledge.visible.contains(where: {
+                        $0.upperBound >= minX && $0.lowerBound <= maxX
+                    }) else { continue }
+                    let baseFraction = min(1, (previous.y - ledge.top) / fall)
+                    let x2 = startX + (endX - startX) * baseFraction
+                    let surface = min(previous.y, ledge.top + drift.height(at: x2))
                     guard flake.position.y <= surface, surface > (landing?.height ?? -.infinity) else { continue }
-                    let fraction = (previous.y - surface) / fall
-                    let crossedEdge = abs(flake.position.x - previous.x) > bounds.width / 2
-                    let x = crossedEdge ? flake.position.x : previous.x + (flake.position.x - previous.x) * fraction
+                    let x = startX + (endX - startX) * ((previous.y - surface) / fall)
                     if ledge.isVisible(x), !ledge.occluders.contains(where: {
                         $0.contains(CGPoint(x: x, y: surface))
                     }) { landing = (ledge, x, surface) }
@@ -278,20 +297,94 @@ struct Snowfield {
                     flake.snowAmount = depositReleased(flake.snowAmount, on: landing.ledge, at: landing.x)
                     if flake.snowAmount > 0.01 && landing.ledge.id != -1 {
                         flake.position.y = min(flake.position.y, landing.ledge.top - 1)
-                        remaining.append(flake)
+                        nextFlakes.append(flake)
                     }
                 } else {
                     deposit(on: landing.ledge, at: landing.x, radius: flake.radius)
                 }
             } else if flake.position.y >= bounds.minY - 6 {
-                remaining.append(flake)
+                nextFlakes.append(flake)
             }
         }
-        flakes = remaining
+        swap(&flakes, &nextFlakes)
+        advancePlow(dt, enabled: plowsEnabled)
         if time >= settleAt {
             settleAt = time + 0.10
             settle()
         }
+    }
+
+    private mutating func advancePlow(_ dt: CGFloat, enabled: Bool) {
+        guard enabled else {
+            if plow != nil { nextPlowTime = time + 19 }
+            plow = nil
+            return
+        }
+        guard var vehicle = plow else {
+            if time >= nextPlowTime {
+                startPlow()
+                nextPlowTime = time + (plow == nil ? 6 : 28 + unit() * 26)
+            }
+            return
+        }
+        guard let drift = drifts[vehicle.ledgeID],
+              let lane = drift.ledge.visible.first(where: {
+                  let center = drift.ledge.frame.minX + vehicle.x
+                  return $0.lowerBound <= center - Plow.halfWidth && $0.upperBound >= center + Plow.halfWidth
+              }) else {
+            plow = nil
+            return
+        }
+        let origin = drift.ledge.frame.minX
+        let end = min(lane.upperBound - origin - Plow.halfWidth,
+                      max(lane.lowerBound - origin + Plow.halfWidth, vehicle.destination))
+        let next = vehicle.x + vehicle.direction * 48 * dt
+        vehicle.x = vehicle.direction > 0 ? min(next, end) : max(next, end)
+        let center = origin + vehicle.x
+        let nose = center + vehicle.direction * Plow.halfWidth
+        let body = CGRect(x: center - Plow.halfWidth, y: drift.ledge.top,
+                          width: Plow.halfWidth * 2, height: 15)
+        guard !drift.ledge.occluders.contains(where: { $0.intersects(body) }) else {
+            plow = nil
+            return
+        }
+        let column = Int((nose - origin) / Self.column)
+        if drift.heights.indices.contains(column), drift.ledge.isVisible(nose) {
+            let removed = min(max(0, drift.heights[column] - 0.45), 135 * dt)
+            if removed > 0.08 {
+                drifts[vehicle.ledgeID]?.heights[column] -= removed
+                unsettled.insert(vehicle.ledgeID)
+                shed(x: nose, y: drift.ledge.top + drift.heights[column] + 3,
+                     amount: removed, sideways: vehicle.direction * 155)
+            }
+        }
+        plow = vehicle.x == end ? nil : vehicle
+    }
+
+    private mutating func startPlow() {
+        var routes: [(id: Int, lane: ClosedRange<CGFloat>)] = []
+        for id in collisionOrder where id == -1 || id > 0 {
+            guard let drift = drifts[id],
+                  drift.ledge.top + 21 <= bounds.maxY else { continue }
+            let origin = drift.ledge.frame.minX
+            for lane in drift.ledge.visible where lane.upperBound - lane.lowerBound >= 150 {
+                let route = CGRect(x: lane.lowerBound, y: drift.ledge.top, width: lane.upperBound - lane.lowerBound, height: 15)
+                guard !drift.ledge.occluders.contains(where: { $0.intersects(route) }) else { continue }
+                let snow = [0.2, 0.4, 0.6, 0.8].reduce(CGFloat.zero) { total, fraction in
+                    total + drift.height(at: lane.lowerBound + route.width * fraction)
+                }
+                if snow >= 8 {
+                    routes.append((id, (lane.lowerBound - origin)...(lane.upperBound - origin)))
+                }
+            }
+        }
+        guard !routes.isEmpty else { return }
+        let route = routes[min(routes.count - 1, Int(unit() * CGFloat(routes.count)))]
+        let left = route.lane.lowerBound + Plow.halfWidth
+        let right = route.lane.upperBound - Plow.halfWidth
+        let direction: CGFloat = unit() < 0.5 ? 1 : -1
+        plow = Plow(ledgeID: route.id, direction: direction,
+                    x: direction > 0 ? left : right, destination: direction > 0 ? right : left)
     }
 
     private mutating func settle() {
@@ -350,7 +443,8 @@ struct Snowfield {
         let count = drifts[ledge.id]?.heights.count ?? 0
         let maxHeight: CGFloat = ledge.id == -1 ? Self.maximumHeight : 16
         var remaining = amount
-        let reach = ledge.id == -1 ? 12 : 5
+        // On the ground, spread overflow out from the impact point until a column can hold it.
+        let reach = ledge.id == -1 ? max(index, count - 1 - index) : 5
         for distance in 0...reach {
             for offset in distance == 0 ? [0] : [-distance, distance] {
                 let i = index + offset
@@ -530,6 +624,9 @@ struct Snowfield {
         take = nil
         balls.removeAll()
         flakes.removeAll()
+        nextFlakes.removeAll(keepingCapacity: true)
+        plow = nil
+        nextPlowTime = time + 19
         unsettled.removeAll()
         for id in Array(drifts.keys) {
             if let count = drifts[id]?.heights.count {

@@ -93,6 +93,9 @@ final class SnowPreferences: ObservableObject {
     private let defaults: UserDefaults
     var changed: (() -> Void)?
     @Published var paused = false
+    @Published var snowplows: Bool {
+        didSet { defaults.set(snowplows, forKey: "snowplows") }
+    }
     @Published var garlands: Bool {
         didSet { defaults.set(garlands, forKey: "garlands"); changed?() }
     }
@@ -135,6 +138,7 @@ final class SnowPreferences: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        snowplows = defaults.object(forKey: "snowplows") as? Bool ?? true
         garlands = defaults.bool(forKey: "garlands")
         weather = min(2, max(0, defaults.object(forKey: "weather") as? Int ?? 1))
         let x = min(1, max(-1, defaults.integer(forKey: "windX")))
@@ -412,6 +416,7 @@ struct SnowControlPanel: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Toggle(tr("Garlands on windows", "Гирлянды на окнах"), isOn: $preferences.garlands)
+                Toggle(tr("Snowplows", "Снегоуборочные машины"), isOn: $preferences.snowplows)
                 Button(tr("Clear snow", "Очистить снег"), action: clearSnow)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {

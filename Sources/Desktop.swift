@@ -198,13 +198,21 @@ final class SnowView: NSView {
     override func draw(_ dirtyRect: NSRect) {
         guard let cg = NSGraphicsContext.current?.cgContext else { return }
         cg.clear(dirtyRect)
+        // Batch flakes with similar opacity into one fill per group.
+        let alphaLevels: [CGFloat] = [0.52, 0.65, 0.78, 0.90, 0.96]
+        let paths = alphaLevels.map { _ in CGMutablePath() }
         for flake in field.flakes {
             let point = local(flake.position)
             let radius = flake.radius * particleScale
             let alpha = flake.detached ? 0.78 : min(0.96, 0.36 + radius * 0.22)
-            cg.setFillColor(flakeColor.withAlphaComponent(alpha * particleOpacity).cgColor)
-            cg.fillEllipse(in: CGRect(x: point.x - radius, y: point.y - radius,
-                                      width: radius * 2, height: radius * 2))
+            let group = min(paths.count - 1, max(0, Int(((alpha - 0.52) / 0.12).rounded())))
+            paths[group].addEllipse(in: CGRect(x: point.x - radius, y: point.y - radius,
+                                               width: radius * 2, height: radius * 2))
+        }
+        for (index, path) in paths.enumerated() where !path.isEmpty {
+            cg.setFillColor(flakeColor.withAlphaComponent(alphaLevels[index] * particleOpacity).cgColor)
+            cg.addPath(path)
+            cg.fillPath()
         }
 
         for id in field.collisionOrder.reversed() {
@@ -222,6 +230,9 @@ final class SnowView: NSView {
             clipCoveredAreas(of: ledge, in: cg)
             drawBall(at: local(center), radius: ball.radius, head: isHead, in: cg)
             cg.restoreGState()
+        }
+        if let plow = field.plow, let ledge = field.drifts[plow.ledgeID]?.ledge {
+            drawPlow(plow, on: ledge, in: cg)
         }
         if let radius = field.held, let cursor {
             if let target = field.placement(at: cursor) {
@@ -278,6 +289,41 @@ final class SnowView: NSView {
         cg.addPath(path)
         cg.setFillColor(snowColor.cgColor)
         cg.fillPath()
+        cg.restoreGState()
+    }
+
+    private func drawPlow(_ plow: Snowfield.Plow, on ledge: Ledge, in cg: CGContext) {
+        let position = local(CGPoint(x: ledge.frame.minX + plow.x, y: ledge.top))
+        cg.saveGState()
+        clipCoveredAreas(of: ledge, in: cg)
+        cg.translateBy(x: position.x, y: position.y + 0.5)
+        cg.scaleBy(x: plow.direction, y: 1)
+
+        let body = CGPath(roundedRect: CGRect(x: -11, y: 3, width: 20, height: 7),
+                          cornerWidth: 2, cornerHeight: 2, transform: nil)
+        let cab = CGPath(roundedRect: CGRect(x: -5, y: 8, width: 10, height: 8),
+                         cornerWidth: 2, cornerHeight: 2, transform: nil)
+        cg.setFillColor(CGColor(red: 0.97, green: 0.49, blue: 0.12, alpha: 1))
+        cg.addPath(body)
+        cg.addPath(cab)
+        cg.fillPath()
+        cg.setFillColor(CGColor(red: 0.74, green: 0.90, blue: 0.96, alpha: 1))
+        cg.fill(CGRect(x: -3, y: 10, width: 6, height: 4))
+        cg.setFillColor(CGColor(red: 1, green: 0.77, blue: 0.31, alpha: 1))
+        cg.fill(CGRect(x: -2, y: 16, width: 3, height: 2))
+        for wheel: CGFloat in [-7, 5] {
+            cg.setFillColor(CGColor(red: 0.12, green: 0.17, blue: 0.22, alpha: 1))
+            cg.fillEllipse(in: CGRect(x: wheel - 2.5, y: 0, width: 5, height: 5))
+            cg.setFillColor(CGColor(gray: 0.64, alpha: 1))
+            cg.fillEllipse(in: CGRect(x: wheel - 1, y: 1.5, width: 2, height: 2))
+        }
+        cg.setStrokeColor(CGColor(red: 0.76, green: 0.87, blue: 0.92, alpha: 1))
+        cg.setLineWidth(2)
+        cg.setLineCap(.round)
+        cg.move(to: CGPoint(x: 9, y: 6))
+        cg.addLine(to: CGPoint(x: 12, y: 1.5))
+        cg.addLine(to: CGPoint(x: 14, y: 1.5))
+        cg.strokePath()
         cg.restoreGState()
     }
 
