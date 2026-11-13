@@ -25,11 +25,12 @@ export STILLSNOW_BUILD_NUMBER=3
 ./scripts/test-macos.sh
 ./scripts/build-macos.sh
 ./scripts/package-macos.sh
+./scripts/package-installer.sh
 ```
 
 Увеличивайте номер сборки при каждом выпуске. Сборочный скрипт по умолчанию подписывает приложение ad hoc. Для публичных сборок с Developer ID подпишите и нотариализуйте приложение перед упаковкой. Перед выпуском проверяйте обновление именно с предыдущей распространяемой версии.
 
-Сохраните подписанный и финальный .app в ZIP. Из этого архива Sparkle установит обновление. DMG остаётся форматом первой установки.
+Сохраните подписанный и финальный .app в ZIP. Из этого архива Sparkle установит обновление. Для первой установки доступны PKG и DMG. PKG устанавливает приложение в /Applications. Чтобы подписать PKG, укажите Developer ID Installer в `STILLSNOW_INSTALLER_IDENTITY`.
 
 ```sh
 mkdir -p build/release
@@ -38,6 +39,6 @@ export STILLSNOW_UPDATE_PRIVATE_KEY_FILE='/private/path/to/ed25519-key'
 ./scripts/generate-appcast.sh build/release 'https://github.com/fqfqfqff/still-snow/releases/download/v0.1.2'
 ```
 
-Загрузите `appcast.xml`, ZIP и установочный DMG в один релиз. Публикуйте их вместе, чтобы ссылка на скачивание работала к моменту появления новой ленты. После подписания изменения в XML требуют новой подписи.
+Загрузите `appcast.xml`, ZIP, PKG и DMG в один релиз. Публикуйте их вместе, чтобы ссылка на скачивание работала к моменту появления новой ленты. После подписания изменения в XML требуют новой подписи.
 
 [Подготовка подписанного appcast в Sparkle](https://sparkle-project.org/documentation/) · [Публикация обновлений](https://sparkle-project.org/documentation/publishing/)

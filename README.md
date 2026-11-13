@@ -6,7 +6,7 @@
 
 ## Быстрый старт
 
-1. Откройте DMG, перетащите Still Snow на значок Applications и откройте приложение из «Программы».
+1. Откройте PKG и завершите установку. Затем откройте Still Snow из «Программ». Для установки через DMG откройте образ и перетащите приложение на значок Applications.
 2. Нажмите на снежинку в строке меню. В панели доступны пауза, сила снегопада, ветер, очистка, гирлянды, обновления и настройки.
 3. Дайте снегу накопиться на верхнем краю окна. Проведите курсором, чтобы сдвинуть снег. Короткий клик по сугробу разбрасывает немного снега.
 4. Для снеговика зажмите мышь на снегу, потяните шар и отпустите на краю окна или на другом шаре. Пунктирное кольцо показывает, куда он встанет. Esc отменяет перетаскивание.
@@ -36,10 +36,10 @@
 open "build/Still Snow.app"
 ```
 
-`Sources/Snow.swift` содержит симуляцию без AppKit, `Sources/Desktop.swift` связывает её с оконной системой, `Sources/Settings.swift` содержит настройки SwiftUI. Настройки хранятся локально в UserDefaults. Скрипт `./scripts/package-macos.sh` собирает DMG со ссылкой на Applications.
+`Sources/Snow.swift` содержит симуляцию без AppKit, `Sources/Desktop.swift` связывает её с оконной системой, `Sources/Settings.swift` содержит настройки SwiftUI. Настройки хранятся локально в UserDefaults. Скрипт `./scripts/package-macos.sh` собирает DMG со ссылкой на Applications. `./scripts/package-installer.sh` собирает PKG с фиксированным путём `/Applications/Still Snow.app`.
 
 Для публикации Windows и Linux потребуются отдельные оконные интеграции. Исходники текущей сборки предназначены для macOS.
 
 ## Quick start in English
 
-Open the DMG and drag Still Snow to Applications. Open the app and click the snow icon in the macOS menu bar. The menu-bar panel contains snowfall controls, garlands, updates, and Settings. Sweep snow with the pointer or drag from a drift to roll a snowball. The download is an ad hoc signed, non-notarized Apple Silicon alpha.
+Run the PKG installer, or open the DMG and drag Still Snow to Applications. Open the app and click the snow icon in the macOS menu bar. The menu-bar panel contains snowfall controls, garlands, updates, and Settings. Sweep snow with the pointer or drag from a drift to roll a snowball. The download is an ad hoc signed, non-notarized Apple Silicon alpha.
