@@ -238,3 +238,34 @@ require(desktopTransition.unsettledWindows(in: [back], now: 0.61, dragging: fals
 require(desktopTransition.unsettledWindows(in: [parkedWindow], now: 0.63, dragging: true).isEmpty,
         "dragging a window updates the snow immediately")
 print("PASS: desktop transition, settled return, and live window dragging.")
+
+let shortLane = Ledge(id: 45, frame: CGRect(x: 19.21, y: 100, width: 88.43, height: 35),
+                      visible: [23.31...102.97])
+var service = Snowfield(bounds: physicsDisplay, seed: 217)
+service.updateLedges([shortLane])
+require(service.callPlow(), "manual dispatch works on a short route before snow accumulates")
+let start = service.plow!.x
+service.step(1.0 / 60, rate: 0, wind: .zero, plowsEnabled: false)
+require(service.plow != nil && service.plow!.x != start,
+        "fractional lane edges and the automatic toggle do not cancel a manual plow")
+
+var flyby = Snowfield(bounds: physicsDisplay, seed: 94)
+flyby.updateLedges([physicsGround, wide])
+for _ in 0..<550 { flyby.step(1.0 / 30, rate: 100, wind: .zero) }
+flyby.callHelicopter()
+var downwash = false
+for _ in 0..<280 {
+    flyby.step(1.0 / 60, rate: 0, wind: .zero)
+    downwash = downwash || flyby.flakes.contains { $0.detached && abs($0.lateralSpeed) > 40 }
+}
+require(downwash && flyby.helicopter == nil, "the flyby displaces real snow and exits the display")
+
+let desktopIcon = DesktopWindow(id: -31, frame: CGRect(x: 28, y: 55, width: 48, height: 48),
+                                layer: -1, dock: false, decorative: true)
+let iconScene = DesktopScene(windows: [])
+let iconLedges = iconScene.ledges(in: screen, desktopIcons: [desktopIcon])
+require(iconLedges.contains { $0.id == desktopIcon.id && $0.decorative }, "an exposed Finder icon can collect snow")
+let hiddenIcon = DesktopScene(windows: [back]).ledges(in: screen, desktopIcons: [desktopIcon])
+require(hiddenIcon.first { $0.id == desktopIcon.id }?.visible.isEmpty == true,
+        "snow behind a normal window stays occluded")
+print("PASS: manual plow, helicopter downwash, and desktop icon occlusion.")

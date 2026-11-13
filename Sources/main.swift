@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreGraphics
 import SwiftUI
 
@@ -31,6 +32,12 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var lastSystemOwnerCheck: TimeInterval = -.infinity
     private var excludedOwners = Set<Int>()
     private var dockPID: Int?
+    private var finderPID: pid_t?
+    private var widgetOwners = Set<Int>()
+    private var iconWindows: [DesktopWindow] = []
+    private var iconReadPending = false
+    private var nextIconRead: TimeInterval = 0
+    private let iconQueue = DispatchQueue(label: "org.stillsnow.desktop-icons", qos: .utility)
     private var lowPower = false
     private var reduceMotion = false
     private var sleeping = false
@@ -171,7 +178,8 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
             lastSnapshot = now
             refreshWindowOwners(at: now)
             var scene = DesktopScene.snapshot(primaryTop: main.frame.maxY, includeOwn: verifyPath != nil,
-                                              excludedOwners: excludedOwners, dockPID: dockPID)
+                                              excludedOwners: excludedOwners, dockPID: dockPID, widgetOwners: widgetOwners)
+            if verifyPath == nil { refreshDesktopIcons(at: now, primaryTop: main.frame.maxY) }
             if verifyIsolatedWindow, let sample = verifyWindow {
                 scene.windows = scene.windows.filter { $0.id == sample.windowNumber }
             }
@@ -194,7 +202,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                     if overlay.view.hasSnowGesture { overlay.view.cancelGesture() }
                     if overlay.panel.isVisible { overlay.panel.orderOut(nil) }
                 } else {
-                    let surfaces = scene.ledges(in: overlay.screen.frame).filter { !transitioning.contains($0.id) }
+                    let surfaces = scene.ledges(in: overlay.screen.frame, desktopIcons: iconWindows).filter { !transitioning.contains($0.id) }
                     let ledges = preferences.accumulate ? surfaces : surfaces.filter { $0.id == -1 }
                     if preferences.garlands {
                         overlay.view.garlandLedges = Array(surfaces.lazy.filter {
@@ -232,7 +240,32 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         excludedOwners = Set(apps.filter { $0.bundleIdentifier.map(utilityApps.contains) ?? false }
             .map { Int($0.processIdentifier) })
         dockPID = apps.first { $0.bundleIdentifier == "com.apple.dock" }.map { Int($0.processIdentifier) }
+        finderPID = apps.first { $0.bundleIdentifier == "com.apple.finder" }?.processIdentifier
+        widgetOwners = Set(apps.filter { app in
+            guard let bundle = app.bundleIdentifier else { return false }
+            return bundle == "com.apple.notificationcenterui" || bundle == "com.apple.widgetkit" ||
+                bundle == "com.apple.dock" || bundle.hasPrefix("com.apple.WidgetKit.")
+        }.map { Int($0.processIdentifier) })
         lastSystemOwnerCheck = now
+    }
+
+    private func refreshDesktopIcons(at now: TimeInterval, primaryTop: CGFloat) {
+        guard preferences.desktopIcons && preferences.accumulate else {
+            iconWindows = []
+            return
+        }
+        guard now >= nextIconRead, !iconReadPending, let finderPID else { return }
+        nextIconRead = now + 2
+        guard AXIsProcessTrusted() else { iconWindows = []; return }
+        iconReadPending = true
+        iconQueue.async { [weak self] in
+            let icons = DesktopIcons.snapshot(primaryTop: primaryTop, finderPID: finderPID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.iconReadPending = false
+                if self.preferences.desktopIcons && self.preferences.accumulate { self.iconWindows = icons }
+            }
+        }
     }
 
     private func screenID(_ screen: NSScreen) -> NSNumber {
@@ -304,6 +337,7 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 preferences: preferences, updates: updates,
                 togglePause: { [weak self] in self?.togglePause() },
                 clearSnow: { [weak self] in self?.clearSnow() },
+                dispatchVehicle: { [weak self] helicopter in self?.dispatchVehicle(helicopter: helicopter) ?? false },
                 checkUpdates: { [weak self] in self?.checkForUpdates() },
                 quit: { [weak self] in self?.quit() }))
             panel.contentSize = CGSize(width: 395, height: 495)
@@ -311,6 +345,26 @@ final class SnowApp: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         panel.appearance = preferences.appearance.appKitAppearance
         panel.show(relativeTo: anchor.bounds, of: anchor, preferredEdge: .minY)
+    }
+
+    private func dispatchVehicle(helicopter: Bool) -> Bool {
+        if paused { togglePause() }
+        lastSnapshot = -.infinity
+        tick()
+        let pointer = NSEvent.mouseLocation
+        let visible = overlays.filter { $0.panel.isVisible }
+        let targets = visible.filter { $0.screen.frame.contains(pointer) } +
+            visible.filter { !$0.screen.frame.contains(pointer) }
+        for target in targets {
+            if helicopter {
+                target.view.field.callHelicopter()
+            } else if !target.view.field.callPlow() {
+                continue
+            }
+            controlPopover?.performClose(nil)
+            return true
+        }
+        return false
     }
 
     func windowDidResignKey(_ notification: Notification) {

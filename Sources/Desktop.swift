@@ -1,5 +1,6 @@
 import AppKit
 import CoreGraphics
+import ApplicationServices
 
 struct DesktopWindow {
     let id: Int
@@ -7,6 +8,7 @@ struct DesktopWindow {
     let layer: Int
     let dock: Bool
     var supportsSnow = true
+    var decorative = false
 }
 
 struct DesktopTransition {
@@ -16,7 +18,7 @@ struct DesktopTransition {
     mutating func unsettledWindows(in windows: [DesktopWindow], now: TimeInterval,
                                    dragging: Bool) -> Set<Int> {
         var frames: [Int: CGRect] = [:]
-        for window in windows where window.supportsSnow && !window.dock {
+        for window in windows where window.supportsSnow && !window.dock && !window.decorative {
             frames[window.id] = window.frame
             guard !dragging, let before = previousFrames[window.id] else { continue }
             let distance = hypot(window.frame.minX - before.minX, window.frame.minY - before.minY)
@@ -40,8 +42,8 @@ struct DesktopScene {
     }
 
     static func snapshot(primaryTop: CGFloat, includeOwn: Bool = false,
-                         excludedOwners: Set<Int> = [], dockPID: Int? = nil) -> DesktopScene {
-        let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements],
+                         excludedOwners: Set<Int> = [], dockPID: Int? = nil, widgetOwners: Set<Int> = []) -> DesktopScene {
+        let raw = CGWindowListCopyWindowInfo(.optionOnScreenOnly,
                                              kCGNullWindowID) as? [[String: Any]] ?? []
         let ownPID = Int(ProcessInfo.processInfo.processIdentifier)
         let windows = raw.compactMap { item -> DesktopWindow? in
@@ -55,11 +57,13 @@ struct DesktopScene {
                   (item[kCGWindowAlpha as String] as? Double ?? 1) > 0.1 else { return nil }
             let dock = owner == dockPID && rect.width >= 85 && rect.height <= 160 &&
                 rect.width / rect.height >= 1.35
-            guard layer == 0 || dock else { return nil }
+            let widget = !dock && widgetOwners.contains(owner) && layer < 0 &&
+                (60...470).contains(rect.width) && (60...470).contains(rect.height)
+            guard layer == 0 || dock || widget else { return nil }
             let frame = CGRect(x: rect.minX, y: primaryTop - rect.maxY,
                                width: rect.width, height: rect.height)
             let supports = dock || (!excludedOwners.contains(owner) && rect.width >= 100 && rect.height >= 64)
-            return DesktopWindow(id: id, frame: frame, layer: layer, dock: dock, supportsSnow: supports)
+            return DesktopWindow(id: id, frame: frame, layer: layer, dock: dock, supportsSnow: supports || widget, decorative: widget)
         }
         return DesktopScene(windows: windows)
     }
@@ -73,7 +77,7 @@ struct DesktopScene {
         }
     }
 
-    func ledges(in frame: CGRect) -> [Ledge] {
+    func ledges(in frame: CGRect, desktopIcons: [DesktopWindow] = []) -> [Ledge] {
         let normals = windows.filter { $0.layer == 0 && !$0.dock }
         var ledges: [Ledge] = []
         if let dock = windows.first(where: {
@@ -89,6 +93,12 @@ struct DesktopScene {
             }
             blockers.append(window.frame)
         }
+        for element in (windows.filter(\.decorative) + desktopIcons).prefix(120) {
+            if let ledge = makeLedge(id: element.id, rect: element.frame, on: frame,
+                                     coveredBy: blockers, decorative: true) {
+                ledges.append(ledge)
+            }
+        }
         let bottom = CGRect(x: frame.minX, y: frame.minY, width: frame.width, height: 1)
         if let ledge = makeLedge(id: -1, rect: bottom, on: frame, coveredBy: blockers) {
             ledges.append(ledge)
@@ -96,7 +106,7 @@ struct DesktopScene {
         return ledges
     }
 
-    private func makeLedge(id: Int, rect: CGRect, on screen: CGRect, coveredBy: [CGRect]) -> Ledge? {
+    private func makeLedge(id: Int, rect: CGRect, on screen: CGRect, coveredBy: [CGRect], decorative: Bool = false) -> Ledge? {
         // Show Desktop leaves a sliver of each parked window at the screen edge.
         let intersection = rect.intersection(screen)
         if id > 0 && (intersection.height < min(42, rect.height * 0.33) ||
@@ -126,7 +136,72 @@ struct DesktopScene {
             if visible.isEmpty { break }
         }
         // Keep an occluded surface in the simulation so its drift can reappear.
-        return Ledge(id: id, frame: rect, visible: visible, occluders: occluders)
+        return Ledge(id: id, frame: rect, visible: visible, occluders: occluders, decorative: decorative)
+    }
+}
+
+// Finder exposes desktop icons as accessibility items inside its desktop scroll area.
+enum DesktopIcons {
+    static func snapshot(primaryTop: CGFloat, finderPID: pid_t) -> [DesktopWindow] {
+        let finder = AXUIElementCreateApplication(finderPID)
+        AXUIElementSetMessagingTimeout(finder, 0.25)
+        let deadline = ProcessInfo.processInfo.systemUptime + 0.35
+        let containers = children(of: finder, limit: 35).filter {
+            attribute($0, kAXRoleAttribute) as? String == kAXScrollAreaRole
+        }
+        var result: [DesktopWindow] = []
+        var seen = Set<CGRectKey>()
+        for container in containers {
+            let direct = children(of: container, limit: 120)
+            let groups = direct.filter {
+                let role = attribute($0, kAXRoleAttribute) as? String
+                return role == kAXListRole || role == kAXGroupRole || role == kAXLayoutAreaRole
+            }
+            let elements = direct + groups.flatMap { children(of: $0, limit: 120) }
+            for element in elements.prefix(160) {
+                guard ProcessInfo.processInfo.systemUptime < deadline else { return result }
+                let role = attribute(element, kAXRoleAttribute) as? String
+                guard role == kAXImageRole || role == kAXLayoutItemRole,
+                      let positionValue = attribute(element, kAXPositionAttribute),
+                      let sizeValue = attribute(element, kAXSizeAttribute),
+                      CFGetTypeID(positionValue) == AXValueGetTypeID(),
+                      CFGetTypeID(sizeValue) == AXValueGetTypeID() else { continue }
+                var position = CGPoint.zero
+                var size = CGSize.zero
+                guard AXValueGetValue(positionValue as! AXValue, .cgPoint, &position),
+                      AXValueGetValue(sizeValue as! AXValue, .cgSize, &size),
+                      position.x.isFinite, position.y.isFinite,
+                      (14...270).contains(size.width), (14...240).contains(size.height) else { continue }
+                let width = min(size.width, size.height, 128)
+                let frame = CGRect(x: position.x + (size.width - width) / 2, y: primaryTop - position.y - width,
+                                   width: width, height: width)
+                let key = CGRectKey(x: Int(frame.minX.rounded()), y: Int(frame.maxY.rounded()))
+                guard seen.insert(key).inserted else { continue }
+                let id = -10 - Int(UInt(bitPattern: key.hashValue) % UInt(Int.max - 10))
+                result.append(DesktopWindow(id: id, frame: frame, layer: -1, dock: false, decorative: true))
+            }
+        }
+        return result
+    }
+
+    private struct CGRectKey: Hashable {
+        let x: Int
+        let y: Int
+    }
+
+    private static func attribute(_ element: AXUIElement, _ name: String) -> CFTypeRef? {
+        var result: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, name as CFString, &result) == .success ? result : nil
+    }
+
+    private static func children(of element: AXUIElement, limit: Int) -> [AXUIElement] {
+        var count = 0
+        let name = kAXChildrenAttribute as CFString
+        guard AXUIElementGetAttributeValueCount(element, name, &count) == .success, count > 0 else { return [] }
+        var values: CFArray?
+        guard AXUIElementCopyAttributeValues(element, name, 0, min(count, limit), &values) == .success
+        else { return [] }
+        return values as? [AXUIElement] ?? []
     }
 }
 
@@ -258,15 +333,17 @@ final class SnowView: NSView {
         for (index, ball) in field.balls.enumerated() where ball.radius > 0 {
             guard let ledge = field.drifts[ball.ledge]?.ledge,
                   let center = field.ballCenter(index, on: ledge), ledge.isVisible(center.x) else { continue }
-            let isHead = ball.below != nil && !field.balls.contains { $0.radius > 0 && $0.below == index }
+            let hasUpperBall = field.balls.contains { $0.radius > 0 && $0.below == index }
+            let isHead = ball.below != nil && !hasUpperBall
             cg.saveGState()
             clipCoveredAreas(of: ledge, in: cg)
-            drawBall(at: local(center), radius: ball.radius, head: isHead, in: cg)
+            drawBall(at: local(center), radius: ball.radius, head: isHead, body: hasUpperBall, in: cg)
             cg.restoreGState()
         }
         if let plow = field.plow, let ledge = field.drifts[plow.ledgeID]?.ledge {
             drawPlow(plow, on: ledge, in: cg)
         }
+        if let helicopter = field.helicopter { drawHelicopter(helicopter, in: cg) }
         if let radius = field.held, let cursor {
             if let target = field.placement(at: cursor) {
                 let center = local(target.center)
@@ -325,37 +402,112 @@ final class SnowView: NSView {
         cg.restoreGState()
     }
 
+    private let vehicleInk = CGColor(red: 0.08, green: 0.14, blue: 0.21, alpha: 1)
+    private let vehicleAmber = CGColor(red: 1, green: 0.57, blue: 0.17, alpha: 1)
+    private let vehicleLight = CGColor(red: 1, green: 0.84, blue: 0.49, alpha: 1)
+    private let vehicleGlass = CGColor(red: 0.54, green: 0.82, blue: 0.91, alpha: 1)
+
+    private func vehicleShape(_ points: [CGPoint], color: CGColor, in cg: CGContext) {
+        guard let first = points.first else { return }
+        cg.beginPath()
+        cg.move(to: first)
+        cg.addLines(between: points)
+        cg.closePath()
+        cg.setFillColor(color)
+        cg.fillPath()
+    }
+
     private func drawPlow(_ plow: Snowfield.Plow, on ledge: Ledge, in cg: CGContext) {
         let position = local(CGPoint(x: ledge.frame.minX + plow.x, y: ledge.top))
         cg.saveGState()
         clipCoveredAreas(of: ledge, in: cg)
         cg.translateBy(x: position.x, y: position.y + 0.5)
         cg.scaleBy(x: plow.direction, y: 1)
-
-        let body = CGPath(roundedRect: CGRect(x: -11, y: 3, width: 20, height: 7),
-                          cornerWidth: 2, cornerHeight: 2, transform: nil)
-        let cab = CGPath(roundedRect: CGRect(x: -5, y: 8, width: 10, height: 8),
-                         cornerWidth: 2, cornerHeight: 2, transform: nil)
-        cg.setFillColor(CGColor(red: 0.97, green: 0.49, blue: 0.12, alpha: 1))
-        cg.addPath(body)
-        cg.addPath(cab)
-        cg.fillPath()
-        cg.setFillColor(CGColor(red: 0.74, green: 0.90, blue: 0.96, alpha: 1))
-        cg.fill(CGRect(x: -3, y: 10, width: 6, height: 4))
-        cg.setFillColor(CGColor(red: 1, green: 0.77, blue: 0.31, alpha: 1))
-        cg.fill(CGRect(x: -2, y: 16, width: 3, height: 2))
-        for wheel: CGFloat in [-7, 5] {
-            cg.setFillColor(CGColor(red: 0.12, green: 0.17, blue: 0.22, alpha: 1))
-            cg.fillEllipse(in: CGRect(x: wheel - 2.5, y: 0, width: 5, height: 5))
-            cg.setFillColor(CGColor(gray: 0.64, alpha: 1))
-            cg.fillEllipse(in: CGRect(x: wheel - 1, y: 1.5, width: 2, height: 2))
+        cg.setFillColor(vehicleInk)
+        cg.fillEllipse(in: CGRect(x: -16, y: -1, width: 31, height: 3))
+        vehicleShape([.init(x: -14, y: 4), .init(x: 11, y: 4), .init(x: 13, y: 11),
+                      .init(x: 5, y: 13), .init(x: 2, y: 22), .init(x: -9, y: 22),
+                      .init(x: -11, y: 13), .init(x: -14, y: 12)], color: vehicleInk, in: cg)
+        vehicleShape([.init(x: -13, y: 7), .init(x: 10, y: 7), .init(x: 11, y: 11),
+                      .init(x: 4, y: 12), .init(x: 1, y: 21), .init(x: -8, y: 21),
+                      .init(x: -10, y: 12), .init(x: -13, y: 11)], color: vehicleAmber, in: cg)
+        vehicleShape([.init(x: -8, y: 14), .init(x: 2, y: 14), .init(x: 0, y: 20),
+                      .init(x: -7, y: 20)], color: vehicleGlass, in: cg)
+        cg.setFillColor(vehicleInk)
+        cg.fill(CGRect(x: -4, y: 14, width: 0.9, height: 6))
+        cg.fill(CGRect(x: -11, y: 8, width: 7, height: 1))
+        cg.setFillColor(vehicleLight)
+        cg.fill(CGRect(x: -13, y: 10, width: 25, height: 1.1))
+        cg.fill(CGRect(x: -4, y: 22, width: 3, height: 2))
+        cg.fill(CGRect(x: 10, y: 11, width: 2, height: 2))
+        for wheel: CGFloat in [-9, 7] {
+            cg.setFillColor(vehicleInk)
+            cg.fillEllipse(in: CGRect(x: wheel - 4.3, y: 0, width: 8.6, height: 8.6))
+            cg.setFillColor(CGColor(gray: 0.58, alpha: 1))
+            cg.fillEllipse(in: CGRect(x: wheel - 2.15, y: 2.15, width: 4.3, height: 4.3))
+            let angle = plow.x / 4
+            cg.setFillColor(vehicleInk)
+            cg.fillEllipse(in: CGRect(x: wheel + cos(angle) * 1.2 - 0.55,
+                                      y: 4.3 + sin(angle) * 1.2 - 0.55, width: 1.1, height: 1.1))
         }
-        cg.setStrokeColor(CGColor(red: 0.76, green: 0.87, blue: 0.92, alpha: 1))
-        cg.setLineWidth(2)
+        vehicleShape([.init(x: 10, y: 3), .init(x: 13, y: 11), .init(x: 17, y: 9),
+                      .init(x: 16, y: 4), .init(x: 20, y: 1), .init(x: 13, y: 0)],
+                     color: vehicleInk, in: cg)
+        vehicleShape([.init(x: 12, y: 3), .init(x: 14, y: 10), .init(x: 16, y: 9),
+                      .init(x: 15, y: 4), .init(x: 18, y: 2), .init(x: 13, y: 1)],
+                     color: vehicleGlass, in: cg)
+        cg.restoreGState()
+    }
+
+    private func drawHelicopter(_ aircraft: Snowfield.Helicopter, in cg: CGContext) {
+        let center = local(CGPoint(x: aircraft.x, y: aircraft.y))
+        cg.saveGState()
+        cg.translateBy(x: center.x, y: center.y + sin(field.time * 4) * 1.3)
+        cg.scaleBy(x: aircraft.direction, y: 1)
+
+        vehicleShape([.init(x: -13, y: 0), .init(x: -30, y: 5), .init(x: -33, y: 15),
+                      .init(x: -27, y: 14), .init(x: -25, y: 9), .init(x: -11, y: 7)],
+                     color: vehicleInk, in: cg)
+        vehicleShape([.init(x: -13, y: 2), .init(x: -29, y: 6), .init(x: -31, y: 13),
+                      .init(x: -28, y: 13), .init(x: -26, y: 8), .init(x: -11, y: 6)],
+                     color: vehicleAmber, in: cg)
+
+        let cabin = CGRect(x: -17, y: -7, width: 36, height: 22)
+        cg.setFillColor(vehicleInk)
+        cg.fillEllipse(in: cabin)
+        cg.setFillColor(vehicleAmber)
+        cg.fillEllipse(in: cabin.insetBy(dx: 1.2, dy: 1.2))
+        vehicleShape([.init(x: 4, y: 13), .init(x: 11, y: 11), .init(x: 16, y: 6),
+                      .init(x: 17, y: 2), .init(x: 6, y: 2)], color: vehicleGlass, in: cg)
+        vehicleShape([.init(x: -8, y: 11), .init(x: 1, y: 12), .init(x: 3, y: 2),
+                      .init(x: -8, y: 2)], color: vehicleGlass, in: cg)
+        cg.setFillColor(vehicleLight)
+        cg.fill(CGRect(x: -13, y: -2, width: 27, height: 1.6))
+
+        cg.setStrokeColor(vehicleInk)
+        cg.setLineWidth(1.9)
         cg.setLineCap(.round)
-        cg.move(to: CGPoint(x: 9, y: 6))
-        cg.addLine(to: CGPoint(x: 12, y: 1.5))
-        cg.addLine(to: CGPoint(x: 14, y: 1.5))
+        cg.move(to: .init(x: -8, y: -5))
+        cg.addLine(to: .init(x: -10, y: -12))
+        cg.move(to: .init(x: 10, y: -5))
+        cg.addLine(to: .init(x: 8, y: -12))
+        cg.move(to: .init(x: -15, y: -12))
+        cg.addLine(to: .init(x: 16, y: -12))
+        cg.addLine(to: .init(x: 19, y: -9))
+        cg.move(to: .init(x: -1, y: 13))
+        cg.addLine(to: .init(x: -1, y: 21))
+        cg.strokePath()
+
+        let rotor = 18 + 15 * abs(cos(field.time * 37))
+        cg.setFillColor(CGColor(red: 0.64, green: 0.80, blue: 0.86, alpha: 0.27))
+        cg.fillEllipse(in: CGRect(x: -34, y: 19, width: 66, height: 5))
+        cg.setStrokeColor(vehicleInk)
+        cg.move(to: .init(x: -rotor - 1, y: 21))
+        cg.addLine(to: .init(x: rotor - 1, y: 21))
+        let tailAngle = field.time * 28
+        let tail = CGPoint(x: cos(tailAngle) * 4, y: sin(tailAngle) * 4)
+        cg.move(to: .init(x: -29 - tail.x, y: 9 - tail.y))
+        cg.addLine(to: .init(x: -29 + tail.x, y: 9 + tail.y))
         cg.strokePath()
         cg.restoreGState()
     }
@@ -399,7 +551,7 @@ final class SnowView: NSView {
             cg.fillEllipse(in: CGRect(x: x - 1.75, y: origin.y - 1.3, width: 3.5, height: 2.6))
         }
 
-        let bulbsPerLoop = max(2, min(5, Int(span / 22)))
+        let bulbsPerLoop = max(2, min(6, Int(span / 22)))
         for loop in 0..<loops {
             for bulb in 0..<bulbsPerLoop {
                 let index = loop * bulbsPerLoop + bulb
@@ -407,7 +559,11 @@ final class SnowView: NSView {
                 let x = origin.x + span * (CGFloat(loop) + progress)
                 guard x >= -12 && x <= bounds.width + 12 else { continue }
                 let y = origin.y - 4 * sag * progress * (1 - progress)
-                let center = CGPoint(x: x, y: y - 5.3)
+                let slope = 4 * sag * (2 * progress - 1) / span
+                cg.saveGState()
+                cg.translateBy(x: x, y: y)
+                cg.rotate(by: atan(slope) * 0.45)
+                let center = CGPoint(x: 0, y: -5.3)
                 let colorIndex = index % bulbColors.count
                 let color = bulbColors[colorIndex]
                 let power = animateGarlands ? 0.86 + 0.14 * sin(field.time * 0.95 + CGFloat(index) * 0.63) : 0.93
@@ -421,11 +577,12 @@ final class SnowView: NSView {
                     cg.restoreGState()
                 }
                 cg.setFillColor(CGColor(red: 0.11, green: 0.21, blue: 0.18, alpha: 1))
-                cg.fill(CGRect(x: x - 1.6, y: y - 3.4, width: 3.2, height: 3.6))
+                cg.fill(CGRect(x: -1.6, y: -3.4, width: 3.2, height: 3.6))
                 cg.setFillColor(color.copy(alpha: power) ?? color)
-                cg.fillEllipse(in: CGRect(x: x - 2.15, y: y - 8.8, width: 4.3, height: 6.1))
+                cg.fillEllipse(in: CGRect(x: -2.15, y: -8.8, width: 4.3, height: 6.1))
                 cg.setFillColor(CGColor(gray: 1, alpha: 0.8 * power))
-                cg.fillEllipse(in: CGRect(x: x - 1.05, y: y - 6.4, width: 1.45, height: 2.5))
+                cg.fillEllipse(in: CGRect(x: -1.05, y: -6.4, width: 1.45, height: 2.5))
+                cg.restoreGState()
             }
         }
         cg.restoreGState()
@@ -442,15 +599,32 @@ final class SnowView: NSView {
         }
     }
 
-    private func drawBall(at center: CGPoint, radius: CGFloat, head: Bool, in cg: CGContext) {
+    private func drawBall(at center: CGPoint, radius: CGFloat, head: Bool, body: Bool = false, in cg: CGContext) {
         let rect = CGRect(x: center.x - radius, y: center.y - radius,
                           width: radius * 2, height: radius * 2)
         cg.setFillColor(snowShadow.cgColor)
         cg.fillEllipse(in: rect)
         cg.setFillColor(snowColor.cgColor)
         cg.fillEllipse(in: rect.insetBy(dx: radius * 0.08, dy: radius * 0.08).offsetBy(dx: -0.45, dy: 0.75))
+        if body {
+            let size = max(0.8, radius * 0.13)
+            cg.setFillColor(ink.cgColor)
+            for offset: CGFloat in [-0.28, 0.12, 0.46] {
+                cg.fillEllipse(in: CGRect(x: center.x - size, y: center.y + radius * offset - size,
+                                          width: size * 2, height: size * 2))
+            }
+        }
         guard head else { return }
+        cg.setFillColor(CGColor(red: 0.78, green: 0.18, blue: 0.27, alpha: 1))
+        cg.fill(CGRect(x: center.x - radius * 0.73, y: center.y - radius * 0.85,
+                       width: radius * 1.46, height: radius * 0.28))
+        cg.fill(CGRect(x: center.x + radius * 0.36, y: center.y - radius * 1.16,
+                       width: radius * 0.27, height: radius * 0.49))
         cg.setFillColor(ink.cgColor)
+        cg.fill(CGRect(x: center.x - radius * 0.79, y: center.y + radius * 0.68,
+                       width: radius * 1.58, height: radius * 0.24))
+        cg.fill(CGRect(x: center.x - radius * 0.47, y: center.y + radius * 0.9,
+                       width: radius * 0.94, height: radius * 0.49))
         for direction: CGFloat in [-1, 1] {
             cg.fillEllipse(in: CGRect(x: center.x + direction * radius * 0.26 - 1,
                                       y: center.y + radius * 0.14, width: 2, height: 2))

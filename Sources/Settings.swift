@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import ApplicationServices
 
 enum SnowStyle: String, CaseIterable, Identifiable {
     case minimal, crystal, frost, retro
@@ -93,6 +94,9 @@ final class SnowPreferences: ObservableObject {
     private let defaults: UserDefaults
     var changed: (() -> Void)?
     @Published var paused = false
+    @Published var desktopIcons: Bool {
+        didSet { defaults.set(desktopIcons, forKey: "desktopIcons"); changed?() }
+    }
     @Published var snowplows: Bool {
         didSet { defaults.set(snowplows, forKey: "snowplows") }
     }
@@ -138,6 +142,7 @@ final class SnowPreferences: ObservableObject {
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        desktopIcons = defaults.bool(forKey: "desktopIcons")
         snowplows = defaults.object(forKey: "snowplows") as? Bool ?? true
         garlands = defaults.bool(forKey: "garlands")
         weather = min(2, max(0, defaults.object(forKey: "weather") as? Int ?? 1))
@@ -224,7 +229,19 @@ struct SnowSettingsView: View {
                         Text(tr("Lavender", "Лавандовый")).tag("lavender")
                         Text(tr("Mint", "Мятный")).tag("mint")
                     }
-                    Toggle(tr("Accumulate on windows", "Накапливать снег на окнах"), isOn: $preferences.accumulate)
+                    Toggle(tr("Accumulate on desktop surfaces", "Накапливать снег на поверхностях"), isOn: $preferences.accumulate)
+                    Toggle(tr("Snow on desktop icons", "Снег на значках рабочего стола"), isOn: $preferences.desktopIcons)
+                        .disabled(!preferences.accumulate)
+                    if preferences.accumulate && preferences.desktopIcons && !AXIsProcessTrusted() {
+                        Button(tr("Open Accessibility settings", "Открыть настройки универсального доступа")) {
+                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
+                                NSWorkspace.shared.open(url)
+                            }
+                        }
+                        Text(tr("Allow Still Snow in Accessibility so it can locate Finder icons.",
+                                "Разреши Still Snow в «Универсальном доступе», чтобы он мог находить значки Finder."))
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
                 }
                 Button(tr("Reset appearance", "Сбросить оформление")) { preferences.reset() }
                     .buttonStyle(.link)
@@ -354,9 +371,11 @@ struct SnowControlPanel: View {
     @ObservedObject var updates: AppUpdates
     let togglePause: () -> Void
     let clearSnow: () -> Void
+    let dispatchVehicle: (Bool) -> Bool
     let checkUpdates: () -> Void
     let quit: () -> Void
     @State private var page = 0
+    @State private var dispatchError: String?
 
     private func tr(_ en: String, _ ru: String) -> String { preferences.language.usesRussian ? ru : en }
 
@@ -416,7 +435,20 @@ struct SnowControlPanel: View {
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 Toggle(tr("Garlands on windows", "Гирлянды на окнах"), isOn: $preferences.garlands)
-                Toggle(tr("Snowplows", "Снегоуборочные машины"), isOn: $preferences.snowplows)
+                Toggle(tr("Automatic snowplows", "Автоматические проезды машины"), isOn: $preferences.snowplows)
+                HStack {
+                    Button(tr("Call snowplow", "Вызвать машину")) {
+                        dispatchError = dispatchVehicle(false) ? nil :
+                            tr("No clear route for a snowplow.", "Сейчас нет свободного пути для машины.")
+                    }
+                    Button(tr("Call helicopter", "Вызвать вертолёт")) {
+                        dispatchError = dispatchVehicle(true) ? nil :
+                            tr("No display available for a flyby.", "Сейчас нет доступного экрана для полёта.")
+                    }
+                }
+                if let dispatchError {
+                    Text(dispatchError).font(.caption).foregroundStyle(.secondary)
+                }
                 Button(tr("Clear snow", "Очистить снег"), action: clearSnow)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
