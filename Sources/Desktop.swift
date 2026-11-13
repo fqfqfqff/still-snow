@@ -9,6 +9,12 @@ struct DesktopWindow {
     let dock: Bool
     var supportsSnow = true
     var decorative = false
+
+    // WindowServer reports a padded host around the visible desktop widget.
+    var surfaceFrame: CGRect {
+        guard decorative, id > 0 else { return frame }
+        return frame.insetBy(dx: 8, dy: 8)
+    }
 }
 
 struct DesktopTransition {
@@ -94,7 +100,7 @@ struct DesktopScene {
             blockers.append(window.frame)
         }
         for element in (windows.filter(\.decorative) + desktopIcons).prefix(120) {
-            if let ledge = makeLedge(id: element.id, rect: element.frame, on: frame,
+            if let ledge = makeLedge(id: element.id, rect: element.surfaceFrame, on: frame,
                                      coveredBy: blockers, decorative: true) {
                 ledges.append(ledge)
             }
@@ -118,7 +124,9 @@ struct DesktopScene {
         guard right - left >= 2, rect.maxY >= screen.minY, rect.maxY <= screen.maxY - 2 else {
             return nil
         }
-        let corner = id > 0 ? min(8, rect.width * 0.06) : 0
+        let widget = decorative && id > 0
+        var corner: CGFloat = id > 0 ? min(8, rect.width * 0.06) : 0
+        if widget { corner = min(20, rect.width * 0.19) }
         let innerLeft = max(left, rect.minX + corner)
         let innerRight = min(right, rect.maxX - corner)
         guard innerRight - innerLeft >= 2 else { return nil }
@@ -519,12 +527,14 @@ final class SnowView: NSView {
     }
 
     private func drawGarland(on ledge: Ledge, in cg: CGContext) {
-        let width = ledge.frame.width - 36
+        let widget = ledge.decorative
+        let inset: CGFloat = widget ? 24 : 18
+        let width = ledge.frame.width - inset * 2
         guard width >= 54 else { return }
-        let origin = local(CGPoint(x: ledge.frame.minX + 18, y: ledge.top - 3))
-        let loops = max(1, Int((width / 135).rounded()))
+        let origin = local(CGPoint(x: ledge.frame.minX + inset, y: ledge.top - (widget ? 5 : 3)))
+        let loops = max(1, Int((width / (widget ? 105 : 135)).rounded()))
         let span = width / CGFloat(loops)
-        let sag = min(12, span * 0.11)
+        let sag = min(widget ? 7 : 12, span * 0.11)
         let wire = CGMutablePath()
         cg.saveGState()
         clipCoveredAreas(of: ledge, in: cg)

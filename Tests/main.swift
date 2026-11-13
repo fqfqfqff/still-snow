@@ -269,3 +269,13 @@ let hiddenIcon = DesktopScene(windows: [back]).ledges(in: screen, desktopIcons: 
 require(hiddenIcon.first { $0.id == desktopIcon.id }?.visible.isEmpty == true,
         "snow behind a normal window stays occluded")
 print("PASS: manual plow, helicopter downwash, and desktop icon occlusion.")
+
+let widgetHost = DesktopWindow(id: 98, frame: CGRect(x: 8, y: 48, width: 360, height: 210),
+                                layer: -2147483601, dock: false, decorative: true)
+let widgetLedge = DesktopScene(windows: [widgetHost]).ledges(in: screen).first { $0.id == widgetHost.id }!
+require(widgetLedge.frame == CGRect(x: 16, y: 56, width: 344, height: 194),
+        "snow and garland share the visible widget tile instead of its padded host")
+require(widgetLedge.visible == [36...340], "snow stops before the widget's rounded corners")
+require(iconLedges.first { $0.id == desktopIcon.id }?.frame == desktopIcon.frame,
+        "Finder icon bounds do not get widget padding removed")
+print("PASS: widget geometry, rounded corners and Finder icon bounds.")
